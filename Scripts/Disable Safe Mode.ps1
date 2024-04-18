@@ -11,6 +11,7 @@ Purpose: PowerShell Script to Revert Windows back int0 Normal Boot Mode and Rest
 
 
 # Check if the script is running as Administrator
+
 if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator"))
 
 {
@@ -20,6 +21,14 @@ if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     Break
     
 }
+
+
+
+
+
+# Set execution policy
+
+Set-ExecutionPolicy RemoteSigned -Force
 
 
 
