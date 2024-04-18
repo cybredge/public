@@ -25,7 +25,15 @@ if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 
 
 
-# Run command to boot into safe mode with networking
+# Set execution policy
+
+Set-ExecutionPolicy RemoteSigned -Force
+
+
+
+
+
+# Run command to boot into safe mode
 
 Try {
 
