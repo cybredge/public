@@ -13,13 +13,27 @@ function FormatHeaderLine {
     return "$left$label$right"
 }
 
+function Get-LoggedInUser {
+    try {
+        $explorerProc = Get-WmiObject Win32_Process -Filter "Name = 'explorer.exe'" | Select-Object -First 1
+        if ($explorerProc) {
+            $user = $explorerProc.GetOwner()
+            return "$($user.Domain)\$($user.User)"
+        } else {
+            return "No user logged in"
+        }
+    } catch {
+        return "Unavailable"
+    }
+}
+
 function Get-SystemInfoText {
     $nl = "`r`n"
     $text = ""
 
     # Device Info
     $computerName = [string]$env:COMPUTERNAME
-    $userName     = [string]$env:USERNAME
+    $userName     = Get-LoggedInUser
     $compSys      = Get-WmiObject Win32_ComputerSystem
     $domain       = [string]$compSys.Domain
 
@@ -29,7 +43,8 @@ function Get-SystemInfoText {
     $osArch       = if ($os.OSArchitecture) { $os.OSArchitecture } else { "Unavailable" }
     $lastReboot   = $os.ConvertToDateTime($os.LastBootUpTime)
     $uptimeSpan   = (Get-Date) - $lastReboot
-    $uptime       = "{0} days {1} hours" -f $uptimeSpan.Days, [Math]::Floor($uptimeSpan.Hours)
+    $uptime = "{0}(days) {1}(hrs) {2}(mins)" -f $uptimeSpan.Days, $uptimeSpan.Hours, $uptimeSpan.Minutes
+
 
     # Hardware Info
     $totalRAMGB   = if ($compSys) { [math]::Round($compSys.TotalPhysicalMemory / 1GB, 1).ToString() + " GB" } else { "Unavailable" }
