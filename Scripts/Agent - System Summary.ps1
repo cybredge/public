@@ -19,36 +19,41 @@ function Get-SystemInfoText {
 
     # Device Info
     $computerName = [string]$env:COMPUTERNAME
-    $userName     = [string]$env:USERNAME
-    $compSys      = Get-WmiObject Win32_ComputerSystem
-    $domain       = [string]$compSys.Domain
+    $userName = if ($env:USERNAME) {
+        $env:USERNAME
+    } else {
+        (Get-WmiObject -Class Win32_ComputerSystem).UserName -replace '.*\\', ''
+    }
+
+    $compSys = Get-WmiObject Win32_ComputerSystem
+    $domain = [string]$compSys.Domain
 
     # OS Info
-    $os           = Get-WmiObject Win32_OperatingSystem
-    $osVersion    = [string]$os.Caption
-    $osArch       = if ($os.OSArchitecture) { $os.OSArchitecture } else { "Unavailable" }
-    $lastReboot   = $os.ConvertToDateTime($os.LastBootUpTime)
-    $uptimeSpan   = (Get-Date) - $lastReboot
-    $uptime       = "{0}(days) {1}(hrs) {2}(mins)" -f $uptimeSpan.Days, $uptimeSpan.Hours, $uptimeSpan.Minutes
+    $os = Get-WmiObject Win32_OperatingSystem
+    $osVersion = [string]$os.Caption
+    $osArch = if ($os.OSArchitecture) { $os.OSArchitecture } else { "Unavailable" }
+    $lastReboot = $os.ConvertToDateTime($os.LastBootUpTime)
+    $uptimeSpan = (Get-Date) - $lastReboot
+    $uptime = "{0} (days) {1} (hours) {2} (minutes)" -f $uptimeSpan.Days, $uptimeSpan.Hours, $uptimeSpan.Minutes
 
     # Hardware Info
-    $totalRAMGB   = if ($compSys) { [math]::Round($compSys.TotalPhysicalMemory / 1GB, 1).ToString() + " GB" } else { "Unavailable" }
+    $totalRAMGB = if ($compSys) { [math]::Round($compSys.TotalPhysicalMemory / 1GB, 1).ToString() + " GB" } else { "Unavailable" }
 
-    $cpuObj       = Get-WmiObject Win32_Processor | Select-Object -First 1
-    $cpu          = if ($cpuObj) { $cpuObj.Name.Trim() } else { "Unavailable" }
+    $cpuObj = Get-WmiObject Win32_Processor | Select-Object -First 1
+    $cpu = if ($cpuObj) { $cpuObj.Name.Trim() } else { "Unavailable" }
 
-    $gpuObj       = Get-WmiObject Win32_VideoController | Select-Object -First 1
-    $gpu          = if ($gpuObj) { $gpuObj.Name } else { "Unavailable" }
+    $gpuObj = Get-WmiObject Win32_VideoController | Select-Object -First 1
+    $gpu = if ($gpuObj) { $gpuObj.Name } else { "Unavailable" }
 
     $manufacturer = if ($compSys.Manufacturer) { $compSys.Manufacturer.Trim() } else { "" }
-    $model        = if ($compSys.Model -and $compSys.Model -notmatch "System Product Name") { $compSys.Model.Trim() } else { "" }
-    $sysModel     = "$manufacturer $model".Trim()
+    $model = if ($compSys.Model -and $compSys.Model -notmatch "System Product Name") { $compSys.Model.Trim() } else { "" }
+    $sysModel = "$manufacturer $model".Trim()
     if (-not $sysModel) { $sysModel = "Unavailable" }
 
     # Disk Info
     $disks = Get-WmiObject Win32_LogicalDisk -Filter "DriveType=3" | ForEach-Object {
         $label = $_.DeviceID
-        $free  = [math]::Round($_.FreeSpace / 1GB, 1)
+        $free = [math]::Round($_.FreeSpace / 1GB, 1)
         $total = [math]::Round($_.Size / 1GB, 1)
         "{0,-4} Free: {1,7} GB | Total: {2,7} GB" -f $label, $free, $total
     }
@@ -57,10 +62,10 @@ function Get-SystemInfoText {
     $adapter = Get-WmiObject Win32_NetworkAdapterConfiguration | Where-Object { $_.IPEnabled } | Select-Object -First 1
     if ($adapter) {
         $adapterName = [string]$adapter.Description
-        $ipAddress   = [string]($adapter.IPAddress | Where-Object { $_ -match '^\d+\.' } | Select-Object -First 1)
-        $subnet      = [string]($adapter.IPSubnet | Where-Object { $_ -match '^\d+\.' } | Select-Object -First 1)
-        $gateway     = [string]($adapter.DefaultIPGateway | Where-Object { $_ -match '^\d+\.' } | Select-Object -First 1)
-        $dnsServers  = ($adapter.DNSServerSearchOrder | Where-Object { $_ -match '^\d+\.' }) -join ", "
+        $ipAddress = [string]($adapter.IPAddress | Where-Object { $_ -match '^\d+\.' } | Select-Object -First 1)
+        $subnet = [string]($adapter.IPSubnet | Where-Object { $_ -match '^\d+\.' } | Select-Object -First 1)
+        $gateway = [string]($adapter.DefaultIPGateway | Where-Object { $_ -match '^\d+\.' } | Select-Object -First 1)
+        $dnsServers = ($adapter.DNSServerSearchOrder | Where-Object { $_ -match '^\d+\.' }) -join ", "
     } else {
         $adapterName = $ipAddress = $subnet = $gateway = $dnsServers = "Unavailable"
     }
@@ -148,6 +153,9 @@ $textbox.Font = New-Object System.Drawing.Font("Consolas", 10)
 $textbox.Text = $textContent
 $textbox.BorderStyle = "None"
 $textbox.AutoSize = $true
+$textbox.TabStop = $false
+$textbox.SelectionStart = 0
+$textbox.SelectionLength = 0
 
 # Size calculation
 $lines = $textbox.Lines.Count
@@ -158,12 +166,4 @@ $textbox.Height = $lines * $charHeight
 
 $form.Controls.Add($textbox)
 $form.ClientSize = $textbox.Size
-
-# Fix blue highlight
-$form.Add_Shown({
-    $textbox.SelectionStart = 0
-    $textbox.SelectionLength = 0
-    $textbox.DeselectAll()
-})
-
 $form.ShowDialog()
