@@ -34,13 +34,14 @@ function Get-SystemInfoText {
     $osArch = if ($os.OSArchitecture) { $os.OSArchitecture } else { "Unavailable" }
     $lastReboot = $os.ConvertToDateTime($os.LastBootUpTime)
     $uptimeSpan = (Get-Date) - $lastReboot
-    $uptime = "{0} (days) {1} (hours) {2} (minutes)" -f $uptimeSpan.Days, $uptimeSpan.Hours, $uptimeSpan.Minutes
+    $uptime = "{0}(days) {1}(hours) {2}(minutes)" -f $uptimeSpan.Days, $uptimeSpan.Hours, $uptimeSpan.Minutes
 
     # Hardware Info
     $totalRAMGB = if ($compSys) { [math]::Round($compSys.TotalPhysicalMemory / 1GB, 1).ToString() + " GB" } else { "Unavailable" }
 
     $cpuObj = Get-WmiObject Win32_Processor | Select-Object -First 1
     $cpu = if ($cpuObj) { $cpuObj.Name.Trim() } else { "Unavailable" }
+    $coreCount = if ($cpuObj) { $cpuObj.NumberOfCores } else { "Unavailable" }
 
     $gpuObj = Get-WmiObject Win32_VideoController | Select-Object -First 1
     $gpu = if ($gpuObj) { $gpuObj.Name } else { "Unavailable" }
@@ -86,6 +87,7 @@ function Get-SystemInfoText {
     $tempText += FormatHeaderLine "Hardware" 50
     $tempText += "Installed RAM     : $totalRAMGB"
     $tempText += "CPU               : $cpu"
+    $tempText += "Cores             : $coreCount"
     $tempText += "GPU               : $gpu"
     $tempText += "System Model      : $sysModel"
     $tempText += ""
@@ -116,6 +118,7 @@ function Get-SystemInfoText {
     $text += $(FormatHeaderLine "Hardware" $longest) + $nl
     $text += "Installed RAM     : $totalRAMGB$nl"
     $text += "CPU               : $cpu$nl"
+    $text += "Cores             : $coreCount$nl"
     $text += "GPU               : $gpu$nl"
     $text += "System Model      : $sysModel$nl$nl"
 
