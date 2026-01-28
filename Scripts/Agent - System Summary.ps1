@@ -108,7 +108,84 @@ function Get-WmiCompat {
 function Get-SystemInfo {
     # Device Info
     $computerName = [string]$env:COMPUTERNAME
-    $userName     = [string]$env:USERNAME
+    
+    # Get logged-in user - account for script running as SYSTEM (RMM agent context)
+    # When running as SYSTEM, we need to query for the actual logged-in user, not the SYSTEM account
+    $userName = ""
+    
+    # Method 1: Query Win32_ComputerSystem for logged-in user (works when running as SYSTEM)
+    try {
+        $compSys = Get-WmiCompat -ClassName Win32_ComputerSystem
+        if ($compSys -and $compSys.UserName) {
+            # Extract username from "DOMAIN\Username" format
+            $userName = $compSys.UserName.Split('\')[-1]
+        }
+    } catch {
+        # Continue to next method
+    }
+    
+    # Method 2: Use quser command to get logged-on users (works when running as SYSTEM)
+    if ([string]::IsNullOrWhiteSpace($userName)) {
+        try {
+            $quserOutput = quser 2>$null
+            if ($quserOutput) {
+                # Parse quser output - format: "USERNAME              SESSIONNAME        ID  STATE   IDLE TIME  LOGON TIME"
+                # Skip header line and get first user
+                $lines = $quserOutput | Where-Object { $_ -match '^\s*\S+\s+\S+\s+\d+\s+\S+' }
+                if ($lines -and $lines.Count -gt 0) {
+                    $firstLine = $lines[0]
+                    # Extract username (first token)
+                    $userName = ($firstLine -split '\s+')[0]
+                }
+            }
+        } catch {
+            # Continue to next method
+        }
+    }
+    
+    # Method 3: Query registry for last logged-in user (fallback)
+    if ([string]::IsNullOrWhiteSpace($userName)) {
+        try {
+            $regPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\LogonUI"
+            if (Test-Path $regPath) {
+                $lastLoggedOnUser = Get-ItemProperty -Path $regPath -Name "LastLoggedOnUser" -ErrorAction SilentlyContinue
+                if ($lastLoggedOnUser -and $lastLoggedOnUser.LastLoggedOnUser) {
+                    $userName = $lastLoggedOnUser.LastLoggedOnUser.Split('\')[-1]
+                }
+            }
+        } catch {
+            # Continue to next method
+        }
+    }
+    
+    # Method 4: Query Win32_LogonSession for interactive sessions (fallback)
+    if ([string]::IsNullOrWhiteSpace($userName)) {
+        try {
+            $logonSessions = Get-WmiCompat -ClassName Win32_LogonSession | Where-Object { $_.LogonType -eq 2 }  # Interactive logon
+            if ($logonSessions) {
+                foreach ($session in $logonSessions) {
+                    $loggedOnUsers = Get-WmiCompat -ClassName Win32_LoggedOnUser | Where-Object { $_.Dependent -like "*$($session.LogonId)*" }
+                    if ($loggedOnUsers) {
+                        foreach ($loggedOnUser in $loggedOnUsers) {
+                            $account = Get-WmiCompat -ClassName Win32_Account | Where-Object { $_.SID -eq $loggedOnUser.Antependent }
+                            if ($account -and $account.Name -ne "SYSTEM") {
+                                $userName = $account.Name
+                                break
+                            }
+                        }
+                        if ($userName) { break }
+                    }
+                }
+            }
+        } catch {
+            # Continue
+        }
+    }
+    
+    # Final fallback
+    if ([string]::IsNullOrWhiteSpace($userName)) {
+        $userName = "Unavailable"
+    }
     
     try {
         $compSys = Get-WmiCompat -ClassName Win32_ComputerSystem
@@ -905,7 +982,9 @@ $deviceRowIndex = 0
 # First group: Computer, User, Domain
 Add-LabelValueRow -Table $deviceTable -RowIndex $deviceRowIndex -LabelText "Computer Name:" -ValueText $sysInfo.ComputerName
 $deviceRowIndex++
-Add-LabelValueRow -Table $deviceTable -RowIndex $deviceRowIndex -LabelText "Logged-in User:" -ValueText $sysInfo.UserName
+# Ensure username is not null or empty before displaying
+$displayUserName = if ([string]::IsNullOrWhiteSpace($sysInfo.UserName)) { "Unavailable" } else { $sysInfo.UserName }
+Add-LabelValueRow -Table $deviceTable -RowIndex $deviceRowIndex -LabelText "Logged-in User:" -ValueText $displayUserName
 $deviceRowIndex++
 Add-LabelValueRow -Table $deviceTable -RowIndex $deviceRowIndex -LabelText "Domain/Workgroup:" -ValueText $sysInfo.Domain
 $deviceRowIndex++
