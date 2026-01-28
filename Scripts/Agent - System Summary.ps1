@@ -316,9 +316,9 @@ $backgroundColor = [System.Drawing.Color]::FromArgb(240, 240, 240)
 $contentColor = [System.Drawing.Color]::White
 
 # Fonts
-$headerFont = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-$valueFont = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-$labelFont = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Regular)
+$headerFont = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+$valueFont = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Bold)
+$labelFont = New-Object System.Drawing.Font("Segoe UI", 7.5, [System.Drawing.FontStyle]::Regular)
 
 # Get system information
 $sysInfo = Get-SystemInfo
@@ -795,7 +795,7 @@ $rootTable = New-Object System.Windows.Forms.TableLayoutPanel
 $rootTable.Dock = [System.Windows.Forms.DockStyle]::Fill
 $rootTable.ColumnCount = 1
 $rootTable.AutoScroll = $true
-$rootTable.Padding = New-Object System.Windows.Forms.Padding(12, 8, 18, 8)
+$rootTable.Padding = New-Object System.Windows.Forms.Padding(10, 6, 14, 6)
 $rootTable.BackColor = $backgroundColor
 $rootTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100))) | Out-Null
 
@@ -822,7 +822,7 @@ function Add-Section {
     $divider = New-Object System.Windows.Forms.Panel
     $divider.Height = 1
     $divider.BackColor = $headerColor
-    $divider.Margin = New-Object System.Windows.Forms.Padding(0, 2, 0, 5)
+    $divider.Margin = New-Object System.Windows.Forms.Padding(0, 1, 0, 3)
     $rootTable.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 1))) | Out-Null
     $rootTable.Controls.Add($divider, 0, $script:currentRow)
     $script:currentRow++
@@ -858,7 +858,7 @@ function Add-LabelValueRow {
         [string]$LabelText,
         [string]$ValueText,
         [System.Drawing.Color]$ValueColor = [System.Drawing.Color]::Black,
-        [int]$RowHeight = 22,
+        [int]$RowHeight = 20,
         [AllowNull()][System.Drawing.Color]$LabelColorOverride,
         [AllowNull()][System.Drawing.Color]$ValueColorOverride,
         [AllowNull()][System.Drawing.Font]$ValueFontOverride
@@ -896,7 +896,7 @@ $deviceTable.ColumnCount = 2
 $deviceTable.AutoSize = $true
 $deviceTable.Dock = [System.Windows.Forms.DockStyle]::Top
 $deviceTable.BackColor = $contentColor
-$deviceTable.Padding = New-Object System.Windows.Forms.Padding(10, 8, 14, 8)
+$deviceTable.Padding = New-Object System.Windows.Forms.Padding(8, 6, 10, 6)
 $deviceTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, 130))) | Out-Null
 $deviceTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize))) | Out-Null
 
@@ -1042,7 +1042,7 @@ $diskTable.RowCount = $sysInfo.Disks.Count + 2
 $diskTable.AutoSize = $true
 $diskTable.Dock = [System.Windows.Forms.DockStyle]::Top
 $diskTable.BackColor = $contentColor
-$diskTable.Padding = New-Object System.Windows.Forms.Padding(10, 8, 14, 8)
+$diskTable.Padding = New-Object System.Windows.Forms.Padding(8, 6, 10, 6)
 
 $diskTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, 50))) | Out-Null
 $diskTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, 90))) | Out-Null
@@ -1124,7 +1124,7 @@ foreach ($disk in $sysInfo.Disks) {
     # Background track panel (faint background)
     $trackPanel = New-Object System.Windows.Forms.Panel
     $trackPanel.BackColor = [System.Drawing.Color]::FromArgb(230, 230, 230)  # Faint gray background track
-    $trackPanel.Height = 16
+    $trackPanel.Height = 14
     $trackPanel.Dock = [System.Windows.Forms.DockStyle]::Fill
     $trackPanel.Margin = New-Object System.Windows.Forms.Padding(0)
     
@@ -1164,7 +1164,7 @@ $networkTable.ColumnCount = 2
 $networkTable.AutoSize = $true
 $networkTable.Dock = [System.Windows.Forms.DockStyle]::Top
 $networkTable.BackColor = $contentColor
-$networkTable.Padding = New-Object System.Windows.Forms.Padding(10, 8, 14, 8)
+$networkTable.Padding = New-Object System.Windows.Forms.Padding(8, 6, 10, 6)
 $networkTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, 130))) | Out-Null
 $networkTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize))) | Out-Null
 
@@ -1191,32 +1191,32 @@ if ($activeAdapters.Count -gt 0) {
             $netRowIndex++
             
             # Small gap below divider
-            $networkTable.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 3))) | Out-Null
+            $networkTable.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 2))) | Out-Null
             $netRowIndex++
         }
         
         # Adapter name (slightly bold for visibility)
-        $adapterNameFont = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-        Add-LabelValueRow -Table $networkTable -RowIndex $netRowIndex -LabelText "Adapter:" -ValueText $adapter.Name -ValueFontOverride $adapterNameFont
+        $adapterNameFont = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Bold)
+        Add-LabelValueRow -Table $networkTable -RowIndex $netRowIndex -LabelText "Adapter:" -ValueText $adapter.Name -ValueFontOverride $adapterNameFont -RowHeight 20
         $netRowIndex++
         
         # IP Address (highlighted)
-        Add-LabelValueRow -Table $networkTable -RowIndex $netRowIndex -LabelText "IP Address:" -ValueText $adapter.IPAddress -ValueColor $accentColor
+        Add-LabelValueRow -Table $networkTable -RowIndex $netRowIndex -LabelText "IP Address:" -ValueText $adapter.IPAddress -ValueColor $accentColor -RowHeight 20
         $netRowIndex++
         
         # Gateway (reduced row height)
-        Add-LabelValueRow -Table $networkTable -RowIndex $netRowIndex -LabelText "Gateway:" -ValueText $adapter.Gateway -RowHeight 22
+        Add-LabelValueRow -Table $networkTable -RowIndex $netRowIndex -LabelText "Gateway:" -ValueText $adapter.Gateway -RowHeight 20
         $netRowIndex++
         
         # Subnet (if available, reduced row height)
         if ($adapter.Subnet) {
-            Add-LabelValueRow -Table $networkTable -RowIndex $netRowIndex -LabelText "Subnet:" -ValueText $adapter.Subnet -RowHeight 22
+            Add-LabelValueRow -Table $networkTable -RowIndex $netRowIndex -LabelText "Subnet:" -ValueText $adapter.Subnet -RowHeight 20
             $netRowIndex++
         }
         
         # DNS Servers (if available, reduced row height)
         if ($adapter.DNSServers -ne "Unavailable") {
-            Add-LabelValueRow -Table $networkTable -RowIndex $netRowIndex -LabelText "DNS Servers:" -ValueText $adapter.DNSServers -RowHeight 22
+            Add-LabelValueRow -Table $networkTable -RowIndex $netRowIndex -LabelText "DNS Servers:" -ValueText $adapter.DNSServers -RowHeight 20
             $netRowIndex++
         }
         
@@ -1232,16 +1232,16 @@ Add-Section -Title "Network" -DataTable $networkTable
 # Footer panel with buttons
 $footerPanel = New-Object System.Windows.Forms.Panel
 $footerPanel.Dock = [System.Windows.Forms.DockStyle]::Bottom
-$footerPanel.Height = 50
+$footerPanel.Height = 45
 $footerPanel.BackColor = $backgroundColor
-$footerPanel.Padding = New-Object System.Windows.Forms.Padding(0, 8, 0, 8)
+$footerPanel.Padding = New-Object System.Windows.Forms.Padding(0, 6, 0, 6)
 
 # Copy button
 $copyButtonColor = [System.Drawing.Color]::White
 $copyButton = New-Object System.Windows.Forms.Button
 $copyButton.Text = "Copy"
-$copyButton.Size = New-Object System.Drawing.Size(100, 28)
-$copyButton.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Regular)
+$copyButton.Size = New-Object System.Drawing.Size(100, 26)
+$copyButton.Font = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Regular)
 $copyButton.BackColor = $copyButtonColor  # White button
 $copyButton.ForeColor = [System.Drawing.Color]::Black  # Black text
 $copyButton.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
@@ -1281,8 +1281,8 @@ $copyButton.Add_Click({
 # Exit button
 $exitButton = New-Object System.Windows.Forms.Button
 $exitButton.Text = "Close"
-$exitButton.Size = New-Object System.Drawing.Size(100, 28)
-$exitButton.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Regular)
+$exitButton.Size = New-Object System.Drawing.Size(100, 26)
+$exitButton.Font = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Regular)
 $exitButton.BackColor = $headerColor
 $exitButton.ForeColor = [System.Drawing.Color]::White
 $exitButton.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
@@ -1358,71 +1358,92 @@ $form.Width = $requiredWidth
 $requiredHeight = 0
 
 # Root padding top
-$requiredHeight += 8
+$requiredHeight += 6
 
 # Device Information section
-$requiredHeight += 20  # Title height (AutoSize)
+$requiredHeight += 18  # Title height (AutoSize, reduced font)
 $requiredHeight += 1   # Divider
-$requiredHeight += 2   # Divider margin top
-$requiredHeight += 5   # Divider margin bottom
+$requiredHeight += 1   # Divider margin top (reduced)
+$requiredHeight += 3   # Divider margin bottom (reduced)
 $deviceRowCount = 6  # Computer, User, Domain, OS, Last Reboot, Uptime
-$requiredHeight += ($deviceRowCount * 22)  # Rows
-$requiredHeight += 16  # Table padding (top + bottom: 8+8)
-$requiredHeight += 10  # Section spacing
+$requiredHeight += ($deviceRowCount * 20)  # Rows (reduced from 22)
+$requiredHeight += 12  # Table padding (top + bottom: 6+6, reduced)
+$requiredHeight += 8   # Section spacing (reduced)
 
 # Hardware section
-$requiredHeight += 20  # Title height
+$requiredHeight += 18  # Title height (reduced font)
 $requiredHeight += 1   # Divider
-$requiredHeight += 2   # Divider margin top
-$requiredHeight += 5   # Divider margin bottom
+$requiredHeight += 1   # Divider margin top (reduced)
+$requiredHeight += 3   # Divider margin bottom (reduced)
 $hardwareRowCount = 1  # CPU
 $hardwareRowCount += $sysInfo.GPUs.Count  # GPU(s)
 $hardwareRowCount += 2  # RAM, Cores
 $hardwareRowCount += 2  # Connection Type, System Model
-$requiredHeight += ($hardwareRowCount * 22)  # Regular rows
-$requiredHeight += 7   # First divider section (3px gap + 1px divider + 3px gap)
-$requiredHeight += 7   # Second divider section (3px gap + 1px divider + 3px gap)
-$requiredHeight += 16  # Table padding (top + bottom: 8+8)
-$requiredHeight += 10  # Section spacing
+$requiredHeight += ($hardwareRowCount * 20)  # Regular rows (reduced from 22)
+$requiredHeight += 5   # First divider section (reduced)
+$requiredHeight += 5   # Second divider section (reduced)
+$requiredHeight += 12  # Table padding (top + bottom: 6+6, reduced)
+$requiredHeight += 8   # Section spacing (reduced)
 
 # Disk Information section
-$requiredHeight += 20  # Title height
+$requiredHeight += 18  # Title height (reduced font)
 $requiredHeight += 1   # Divider
-$requiredHeight += 2   # Divider margin top
-$requiredHeight += 5   # Divider margin bottom
-$requiredHeight += 20  # Header row
+$requiredHeight += 1   # Divider margin top (reduced)
+$requiredHeight += 3   # Divider margin bottom (reduced)
+$requiredHeight += 18  # Header row (reduced font)
 $requiredHeight += 1   # Separator line
 $diskRowCount = if ($sysInfo.Disks.Count -gt 0) { $sysInfo.Disks.Count } else { 1 }
-$requiredHeight += ($diskRowCount * 26)  # Data rows
-$requiredHeight += 16  # Table padding (top + bottom: 8+8)
-$requiredHeight += 10  # Section spacing
+$requiredHeight += ($diskRowCount * 24)  # Data rows (reduced from 26)
+$requiredHeight += 12  # Table padding (top + bottom: 6+6, reduced)
+$requiredHeight += 8   # Section spacing (reduced)
 
 # Network section - first adapter only
-$requiredHeight += 20  # Title height
+$requiredHeight += 18  # Title height (reduced font)
 $requiredHeight += 1   # Divider
-$requiredHeight += 2   # Divider margin top
-$requiredHeight += 5   # Divider margin bottom
+$requiredHeight += 1   # Divider margin top (reduced)
+$requiredHeight += 3   # Divider margin bottom (reduced)
 if ($activeAdapters.Count -gt 0) {
-    $requiredHeight += 5   # Top margin for first adapter
-    $firstAdapterRows = 1  # Adapter name
-    $firstAdapterRows += 1  # IP Address
-    if ($activeAdapters[0].Gateway) { $firstAdapterRows += 1 }
-    if ($activeAdapters[0].Subnet) { $firstAdapterRows += 1 }
-    if ($activeAdapters[0].DNSServers -ne "Unavailable") { $firstAdapterRows += 1 }
-    $requiredHeight += ($firstAdapterRows * 22)  # Rows
-    $requiredHeight += 16  # Table padding (top + bottom: 8+8)
+    # First adapter has NO top margin (only subsequent adapters do)
+    # Count all rows for first adapter: Adapter name, IP Address, Gateway (always shown), Subnet (if exists), DNS Servers (always shown)
+    # Actual rows: 5 (Adapter, IP, Gateway, Subnet, DNS)
+    # However, AutoSize elements add extra height:
+    # - Title label with AutoSize: ~22px actual (9pt Bold font) vs estimated 18px = +4px
+    # - RoundedPanel wrapper: border (1px top + 1px bottom) + border radius overhead = ~4px
+    # - TableLayoutPanel AutoSize spacing: ~2px
+    # - Safety buffer for different DPI/font rendering: ~30px
+    # Total extra needed: ~40px = 2 rows worth
+    # So we use 7 rows (5 actual + 2 buffer) to ensure all fields are visible across all systems
+    $firstAdapterRows = 5  # Actual data rows: Adapter, IP, Gateway, Subnet, DNS
+    $firstAdapterRows += 2  # Buffer for AutoSize elements, RoundedPanel wrapper, and rendering differences
+    $requiredHeight += ($firstAdapterRows * 20)  # All rows use RowHeight 20
+    $requiredHeight += 12  # Table padding (top + bottom: 6+6, reduced)
+} else {
+    # Even if no adapters, add some height for the "No adapters" message
+    $requiredHeight += 20  # Minimum height for empty state
+    $requiredHeight += 12  # Table padding
 }
 
 # Footer
-$requiredHeight += 50
+$requiredHeight += 45  # Reduced from 50
 
 # Root padding bottom
-$requiredHeight += 8
+$requiredHeight += 6
 
-# Add buffer for form borders, title bar, etc.
-$requiredHeight += 40
+# Add buffer for form borders, title bar, etc. (increased to ensure all content is visible)
+$requiredHeight += 50
 
-if ($requiredHeight -lt 650) { $requiredHeight = 650 }
+# Ensure minimum height to display Device Info, Hardware, Disk Info, Network section, and ALL fields of first adapter
+# With reduced sizes, calculate a more accurate minimum that includes all adapter fields
+# Network section: Title(18) + Divider(1) + DividerMarginTop(1) + DividerMarginBottom(3) + AdapterRows(5*20) + TablePadding(12) = 18+1+1+3+100+12 = 135
+# Note: First adapter has NO top margin (only subsequent adapters do)
+# Always use maximum rows (5) to ensure Subnet and DNS are visible even if Subnet doesn't exist
+$minHeight = 6 + 18 + 1 + 1 + 3 + (6 * 20) + 12 + 8 +  # Device Info: RootPaddingTop(6) + Title(18) + Divider(1) + MarginTop(1) + MarginBottom(3) + Rows(6*20) + TablePadding(12) + SectionSpacing(8)
+             18 + 1 + 1 + 3 + (6 * 20) + 5 + 5 + 12 + 8 +  # Hardware: Title(18) + Divider(1) + MarginTop(1) + MarginBottom(3) + Rows(6*20) + Dividers(5+5) + TablePadding(12) + SectionSpacing(8)
+             18 + 1 + 1 + 3 + 18 + 1 + (1 * 24) + 12 + 8 +  # Disk Info: Title(18) + Divider(1) + MarginTop(1) + MarginBottom(3) + HeaderRow(18) + Separator(1) + DataRows(1*24) + TablePadding(12) + SectionSpacing(8)
+             18 + 1 + 1 + 3 + (7 * 20) + 12 +  # Network: Title(18) + Divider(1) + MarginTop(1) + MarginBottom(3) + AdapterRows(7*20: 5 actual + 2 buffer for AutoSize/RoundedPanel) + TablePadding(12) - NO top margin for first adapter
+             45 + 6 + 50  # Footer(45) + RootPaddingBottom(6) + Buffer(50)
+# Ensure height is at least enough to show all first adapter fields (always use minimum that includes all 5 rows)
+if ($requiredHeight -lt $minHeight) { $requiredHeight = $minHeight }
 $form.Height = $requiredHeight
 
 # Resize handler to keep tables full-width (but allow AutoSize columns to expand)
