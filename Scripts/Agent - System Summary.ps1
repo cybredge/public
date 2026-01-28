@@ -113,18 +113,76 @@ function Get-SystemInfo {
     # When running as SYSTEM, we need to query for the actual logged-in user, not the SYSTEM account
     $userName = ""
     
-    # Method 1: Query Win32_ComputerSystem for logged-in user (works when running as SYSTEM)
+    # Method 1: Query explorer.exe process owner (most reliable when running as SYSTEM)
+    # Explorer.exe runs in the user's session, so its owner is the logged-in user
     try {
-        $compSys = Get-WmiCompat -ClassName Win32_ComputerSystem
-        if ($compSys -and $compSys.UserName) {
-            # Extract username from "DOMAIN\Username" format
-            $userName = $compSys.UserName.Split('\')[-1]
+        $explorerProcesses = Get-WmiCompat -ClassName Win32_Process | Where-Object { $_.Name -eq "explorer.exe" }
+        if ($explorerProcesses) {
+            foreach ($proc in $explorerProcesses) {
+                try {
+                    $owner = $proc.GetOwner()
+                    if ($owner -and $owner.User -and $owner.User -ne "SYSTEM" -and $owner.User -ne "LOCAL SERVICE" -and $owner.User -ne "NETWORK SERVICE") {
+                        $userName = $owner.User
+                        break
+                    }
+                } catch {
+                    # Continue to next process
+                }
+            }
         }
     } catch {
         # Continue to next method
     }
     
-    # Method 2: Use quser command to get logged-on users (works when running as SYSTEM)
+    # Method 2: Query Win32_LogonSession for interactive sessions (LogonType 2 = local, 10 = RDP)
+    if ([string]::IsNullOrWhiteSpace($userName)) {
+        try {
+            $logonSessions = Get-WmiCompat -ClassName Win32_LogonSession | Where-Object { ($_.LogonType -eq 2) -or ($_.LogonType -eq 10) }
+            if ($logonSessions) {
+                # Get all logged-on user associations
+                $loggedOnUsers = Get-WmiCompat -ClassName Win32_LoggedOnUser
+                if ($loggedOnUsers) {
+                    foreach ($session in $logonSessions) {
+                        foreach ($lu in $loggedOnUsers) {
+                            # Check if this logged-on user matches this session
+                            # Dependent property contains the logon session reference
+                            if ($lu.Dependent -like "*LogonId=$($session.LogonId)*") {
+                                # Antependent contains the account reference (SID)
+                                $accountSid = $lu.Antependent
+                                # Extract SID from the reference string
+                                if ($accountSid -match 'SID="([^"]+)"') {
+                                    $sid = $matches[1]
+                                    $account = Get-WmiCompat -ClassName Win32_Account | Where-Object { $_.SID -eq $sid }
+                                    if ($account -and $account.Name -ne "SYSTEM" -and $account.Name -ne "LOCAL SERVICE" -and $account.Name -ne "NETWORK SERVICE" -and $account.Domain -ne "NT AUTHORITY") {
+                                        $userName = $account.Name
+                                        break
+                                    }
+                                }
+                            }
+                        }
+                        if ($userName) { break }
+                    }
+                }
+            }
+        } catch {
+            # Continue to next method
+        }
+    }
+    
+    # Method 3: Query Win32_ComputerSystem for logged-in user (may work in some cases)
+    if ([string]::IsNullOrWhiteSpace($userName)) {
+        try {
+            $compSys = Get-WmiCompat -ClassName Win32_ComputerSystem
+            if ($compSys -and $compSys.UserName -and $compSys.UserName -ne "" -and $compSys.UserName -notmatch "SYSTEM") {
+                # Extract username from "DOMAIN\Username" format
+                $userName = $compSys.UserName.Split('\')[-1]
+            }
+        } catch {
+            # Continue to next method
+        }
+    }
+    
+    # Method 4: Use quser command to get logged-on users (works when running as SYSTEM)
     if ([string]::IsNullOrWhiteSpace($userName)) {
         try {
             $quserOutput = quser 2>$null
@@ -135,50 +193,14 @@ function Get-SystemInfo {
                 if ($lines -and $lines.Count -gt 0) {
                     $firstLine = $lines[0]
                     # Extract username (first token)
-                    $userName = ($firstLine -split '\s+')[0]
-                }
-            }
-        } catch {
-            # Continue to next method
-        }
-    }
-    
-    # Method 3: Query registry for last logged-in user (fallback)
-    if ([string]::IsNullOrWhiteSpace($userName)) {
-        try {
-            $regPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\LogonUI"
-            if (Test-Path $regPath) {
-                $lastLoggedOnUser = Get-ItemProperty -Path $regPath -Name "LastLoggedOnUser" -ErrorAction SilentlyContinue
-                if ($lastLoggedOnUser -and $lastLoggedOnUser.LastLoggedOnUser) {
-                    $userName = $lastLoggedOnUser.LastLoggedOnUser.Split('\')[-1]
-                }
-            }
-        } catch {
-            # Continue to next method
-        }
-    }
-    
-    # Method 4: Query Win32_LogonSession for interactive sessions (fallback)
-    if ([string]::IsNullOrWhiteSpace($userName)) {
-        try {
-            $logonSessions = Get-WmiCompat -ClassName Win32_LogonSession | Where-Object { $_.LogonType -eq 2 }  # Interactive logon
-            if ($logonSessions) {
-                foreach ($session in $logonSessions) {
-                    $loggedOnUsers = Get-WmiCompat -ClassName Win32_LoggedOnUser | Where-Object { $_.Dependent -like "*$($session.LogonId)*" }
-                    if ($loggedOnUsers) {
-                        foreach ($loggedOnUser in $loggedOnUsers) {
-                            $account = Get-WmiCompat -ClassName Win32_Account | Where-Object { $_.SID -eq $loggedOnUser.Antependent }
-                            if ($account -and $account.Name -ne "SYSTEM") {
-                                $userName = $account.Name
-                                break
-                            }
-                        }
-                        if ($userName) { break }
+                    $extractedUser = ($firstLine -split '\s+')[0]
+                    if ($extractedUser -and $extractedUser -ne "USERNAME") {
+                        $userName = $extractedUser
                     }
                 }
             }
         } catch {
-            # Continue
+            # Continue to next method
         }
     }
     
@@ -1532,5 +1554,21 @@ $rootTable.Add_Resize({
     # Device, Hardware, and Network tables use AutoSize for value column, so they'll expand naturally
 })
 
+# Auto-close timer - close form after 3 minutes (180 seconds)
+$autoCloseTimer = New-Object System.Windows.Forms.Timer
+$autoCloseTimer.Interval = 180000  # 3 minutes in milliseconds (180 * 1000)
+$autoCloseTimer.Add_Tick({
+    $autoCloseTimer.Stop()
+    $autoCloseTimer.Dispose()
+    $form.Close()
+})
+$autoCloseTimer.Start()
+
 # Show form
 $form.ShowDialog()
+
+# Clean up timer when form closes
+if ($autoCloseTimer) {
+    $autoCloseTimer.Stop()
+    $autoCloseTimer.Dispose()
+}
