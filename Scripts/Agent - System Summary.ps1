@@ -961,10 +961,9 @@ function Format-SystemInfoForEmail {
         }
         .disk-table th:nth-child(3),
         .disk-table th:nth-child(4),
-        .disk-table th:nth-child(5),
         .disk-table th:nth-child(5) {
             text-align: right;
-            width: 90px;
+            width: 80px;
         }
         .disk-table td {
             padding: 2px 5px;
@@ -981,11 +980,11 @@ function Format-SystemInfoForEmail {
             overflow-wrap: break-word;
         }
         .disk-table td:nth-child(3),
-        .disk-table td:nth-child(5),
+        .disk-table td:nth-child(4),
         .disk-table td:nth-child(5) {
             text-align: right;
             font-variant-numeric: tabular-nums;
-            width: 90px;
+            width: 80px;
         }
         .network-table {
             width: 100%;
@@ -1229,7 +1228,8 @@ $rootTable = New-Object System.Windows.Forms.TableLayoutPanel
 $rootTable.Dock = [System.Windows.Forms.DockStyle]::Fill
 $rootTable.ColumnCount = 1
 $rootTable.AutoScroll = $true
-$rootTable.Padding = New-Object System.Windows.Forms.Padding(10, 6, 14, 6)
+$rootTable.AutoScrollMargin = New-Object System.Drawing.Size(0, 8)
+$rootTable.Padding = New-Object System.Windows.Forms.Padding(10, 6, 14, 10)
 $rootTable.BackColor = $backgroundColor
 $rootTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100))) | Out-Null
 
@@ -1343,7 +1343,7 @@ $deviceTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([Syst
 $deviceRowIndex = 0
 
 # First group: Computer, User, Domain
-Add-LabelValueRow -Table $deviceTable -RowIndex $deviceRowIndex -LabelText "Computer Name:" -ValueText $sysInfo.ComputerName -ValueColor $accentColor
+Add-LabelValueRow -Table $deviceTable -RowIndex $deviceRowIndex -LabelText "Computer Name:" -ValueText $sysInfo.ComputerName -ValueColor $accentColor -LabelColorOverride $accentColor
 $deviceRowIndex++
 # Ensure username is not null or empty before displaying
 $displayUserName = if ([string]::IsNullOrWhiteSpace($sysInfo.UserName)) { "Unavailable" } else { $sysInfo.UserName }
@@ -1355,70 +1355,12 @@ if ($sysInfo.IsAdmin) {
 Add-LabelValueRow -Table $deviceTable -RowIndex $deviceRowIndex -LabelText "Logged-in User:" -ValueText $displayUserName
 $deviceRowIndex++
 
-# Domain/Workgroup row with expandable Domain Joined detail.
+# Domain/Workgroup rows (non-expandable).
 $domainDisplay = if ([string]::IsNullOrWhiteSpace($sysInfo.Domain)) { "Unavailable" } else { $sysInfo.Domain }
 $domainJoinedUi = if ($sysInfo.DomainJoined) { "TRUE" } else { "FALSE" }
-$deviceTable.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 20))) | Out-Null
-
-$domainLabel = New-Object System.Windows.Forms.Label
-$domainLabel.Text = "Domain/Workgroup:"
-$domainLabel.Font = $labelFont
-$domainLabel.ForeColor = $labelColor
-$domainLabel.AutoSize = $true
-$domainLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
-$deviceTable.Controls.Add($domainLabel, 0, $deviceRowIndex)
-
-$domainValueLink = New-Object System.Windows.Forms.LinkLabel
-$domainValueLink.Text = "$domainDisplay [+]"
-$domainValueLink.Font = $valueFont
-$domainValueLink.ForeColor = $valueColor
-$domainValueLink.LinkColor = $headerColor
-$domainValueLink.ActiveLinkColor = $headerColor
-$domainValueLink.VisitedLinkColor = $headerColor
-$domainValueLink.LinkBehavior = [System.Windows.Forms.LinkBehavior]::NeverUnderline
-$domainValueLink.AutoSize = $true
-$domainValueLink.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
-$domainValueLink.Margin = New-Object System.Windows.Forms.Padding(6, 0, 0, 0)
-$domainValueLink.Tag = $false
-$domainValueLink.LinkArea = New-Object System.Windows.Forms.LinkArea(($domainDisplay.Length + 1), 3)
-$deviceTable.Controls.Add($domainValueLink, 1, $deviceRowIndex)
+Add-LabelValueRow -Table $deviceTable -RowIndex $deviceRowIndex -LabelText "Domain/Workgroup:" -ValueText $domainDisplay
 $deviceRowIndex++
-
-$domainDetailRowIndex = $deviceRowIndex
-$deviceTable.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 0))) | Out-Null
-$domainDetailValue = New-Object System.Windows.Forms.Label
-$domainDetailValue.Text = "> Domain Joined: $domainJoinedUi"
-$domainDetailValue.Font = New-Object System.Drawing.Font("Segoe UI", 7.5, [System.Drawing.FontStyle]::Regular)
-$domainDetailValue.ForeColor = [System.Drawing.Color]::FromArgb(110, 110, 110)
-$domainDetailValue.AutoSize = $true
-$domainDetailValue.Visible = $false
-$domainDetailValue.Margin = New-Object System.Windows.Forms.Padding(6, 0, 0, 0)
-$deviceTable.Controls.Add($domainDetailValue, 1, $domainDetailRowIndex)
-
-$domainValueLink.Add_LinkClicked({
-    $isExpanded = [bool]$domainValueLink.Tag
-    $isExpanded = -not $isExpanded
-    $domainValueLink.Tag = $isExpanded
-    if ($isExpanded) {
-        $domainValueLink.Text = "$domainDisplay [-]"
-        $domainLabel.ForeColor = $headerColor
-        $domainValueLink.ForeColor = $headerColor
-        $domainDetailValue.ForeColor = $headerColor
-        $domainDetailValue.Visible = $true
-        $deviceTable.RowStyles[$domainDetailRowIndex].Height = 18
-    } else {
-        $domainValueLink.Text = "$domainDisplay [+]"
-        $domainLabel.ForeColor = $labelColor
-        $domainValueLink.ForeColor = $valueColor
-        $domainDetailValue.ForeColor = [System.Drawing.Color]::FromArgb(110, 110, 110)
-        $domainDetailValue.Visible = $false
-        $deviceTable.RowStyles[$domainDetailRowIndex].Height = 0
-    }
-    $domainValueLink.LinkArea = New-Object System.Windows.Forms.LinkArea(($domainDisplay.Length + 1), 3)
-    $deviceTable.PerformLayout()
-    $rootTable.PerformLayout()
-    $form.PerformLayout()
-})
+Add-LabelValueRow -Table $deviceTable -RowIndex $deviceRowIndex -LabelText "Domain Joined:" -ValueText $domainJoinedUi
 $deviceRowIndex++
 
     # Small gap above divider
@@ -1440,7 +1382,7 @@ $deviceRowIndex++
     $deviceTable.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 3))) | Out-Null
 $deviceRowIndex++
 
-# Second group: Operating System with expandable details
+# Second group: Operating System (non-expandable)
 $osDisplay = if ($sysInfo.OSArch -ne "Unavailable" -and $sysInfo.OSVersion -ne "Unavailable") {
     "$($sysInfo.OSVersion) ($($sysInfo.OSArch))"
 } elseif ($sysInfo.OSVersion -ne "Unavailable") {
@@ -1448,70 +1390,16 @@ $osDisplay = if ($sysInfo.OSArch -ne "Unavailable" -and $sysInfo.OSVersion -ne "
 } else {
     "Unavailable"
 }
-$osVersionDetail = if ($sysInfo.OSVersionNumber) { $sysInfo.OSVersionNumber } else { "Unavailable" }
-$osBuildDetail = if ($sysInfo.OSBuildNumber) { $sysInfo.OSBuildNumber } else { "Unavailable" }
-$osDetailText = "> Version: $osVersionDetail | Build: $osBuildDetail"
-$deviceTable.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 20))) | Out-Null
-
-$osLabel = New-Object System.Windows.Forms.Label
-$osLabel.Text = "Operating System:"
-$osLabel.Font = $labelFont
-$osLabel.ForeColor = $labelColor
-$osLabel.AutoSize = $true
-$osLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
-$deviceTable.Controls.Add($osLabel, 0, $deviceRowIndex)
-
-$osValueLink = New-Object System.Windows.Forms.LinkLabel
-$osValueLink.Text = "$osDisplay [+]"
-$osValueLink.Font = $valueFont
-$osValueLink.ForeColor = $valueColor
-$osValueLink.LinkColor = $headerColor
-$osValueLink.ActiveLinkColor = $headerColor
-$osValueLink.VisitedLinkColor = $headerColor
-$osValueLink.LinkBehavior = [System.Windows.Forms.LinkBehavior]::NeverUnderline
-$osValueLink.AutoSize = $true
-$osValueLink.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
-$osValueLink.Margin = New-Object System.Windows.Forms.Padding(6, 0, 0, 0)
-$osValueLink.Tag = $false
-$osValueLink.LinkArea = New-Object System.Windows.Forms.LinkArea(($osDisplay.Length + 1), 3)
-$deviceTable.Controls.Add($osValueLink, 1, $deviceRowIndex)
+Add-LabelValueRow -Table $deviceTable -RowIndex $deviceRowIndex -LabelText "Operating System:" -ValueText $osDisplay -ValueColor $accentColor -LabelColorOverride $accentColor
 $deviceRowIndex++
-
-$osDetailRowIndex = $deviceRowIndex
-$deviceTable.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 0))) | Out-Null
-$osDetailValue = New-Object System.Windows.Forms.Label
-$osDetailValue.Text = $osDetailText
-$osDetailValue.Font = New-Object System.Drawing.Font("Segoe UI", 7.5, [System.Drawing.FontStyle]::Regular)
-$osDetailValue.ForeColor = [System.Drawing.Color]::FromArgb(110, 110, 110)
-$osDetailValue.AutoSize = $true
-$osDetailValue.Visible = $false
-$osDetailValue.Margin = New-Object System.Windows.Forms.Padding(6, 0, 0, 0)
-$deviceTable.Controls.Add($osDetailValue, 1, $osDetailRowIndex)
-
-$osValueLink.Add_LinkClicked({
-    $isExpanded = [bool]$osValueLink.Tag
-    $isExpanded = -not $isExpanded
-    $osValueLink.Tag = $isExpanded
-    if ($isExpanded) {
-        $osValueLink.Text = "$osDisplay [-]"
-        $osLabel.ForeColor = $headerColor
-        $osValueLink.ForeColor = $headerColor
-        $osDetailValue.ForeColor = $headerColor
-        $osDetailValue.Visible = $true
-        $deviceTable.RowStyles[$osDetailRowIndex].Height = 18
-    } else {
-        $osValueLink.Text = "$osDisplay [+]"
-        $osLabel.ForeColor = $labelColor
-        $osValueLink.ForeColor = $valueColor
-        $osDetailValue.ForeColor = [System.Drawing.Color]::FromArgb(110, 110, 110)
-        $osDetailValue.Visible = $false
-        $deviceTable.RowStyles[$osDetailRowIndex].Height = 0
-    }
-    $osValueLink.LinkArea = New-Object System.Windows.Forms.LinkArea(($osDisplay.Length + 1), 3)
-    $deviceTable.PerformLayout()
-    $rootTable.PerformLayout()
-    $form.PerformLayout()
-})
+$osVersionDetail = if ([string]::IsNullOrWhiteSpace($sysInfo.OSVersionNumber)) { "Unavailable" } else { $sysInfo.OSVersionNumber }
+$osBuildDetail = if ([string]::IsNullOrWhiteSpace($sysInfo.OSBuildNumber)) { "" } else { " Build $($sysInfo.OSBuildNumber)" }
+if ($osVersionDetail -eq "Unavailable") {
+    $osVersionLine = "Unavailable"
+} else {
+    $osVersionLine = "$osVersionDetail$osBuildDetail"
+}
+Add-LabelValueRow -Table $deviceTable -RowIndex $deviceRowIndex -LabelText "Version:" -ValueText $osVersionLine
 $deviceRowIndex++
 
 # Third group: Last Reboot, Uptime
@@ -1603,7 +1491,7 @@ $hardwareRowIndex++
 $hardwareRowIndex++
 
 # Third group: Connection Type, System Model
-Add-LabelValueRow -Table $hardwareTable -RowIndex $hardwareRowIndex -LabelText "Connection Type:" -ValueText $connectionType -ValueColor $accentColor
+Add-LabelValueRow -Table $hardwareTable -RowIndex $hardwareRowIndex -LabelText "Connection Type:" -ValueText $connectionType -ValueColor $accentColor -LabelColorOverride $accentColor
 $hardwareRowIndex++
 Add-LabelValueRow -Table $hardwareTable -RowIndex $hardwareRowIndex -LabelText "System Model:" -ValueText $sysInfo.SystemModel
 
@@ -1620,8 +1508,8 @@ $diskTable.Padding = New-Object System.Windows.Forms.Padding(8, 6, 10, 6)
 
 $diskTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, 50))) | Out-Null
 $diskTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize))) | Out-Null
-$diskTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, 90))) | Out-Null
-$diskTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, 90))) | Out-Null
+$diskTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, 80))) | Out-Null
+$diskTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, 80))) | Out-Null
 $diskTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100))) | Out-Null
 
 # Header row
@@ -1756,7 +1644,7 @@ $netRowIndex = 0
 
 $publicIpUi = if ($sysInfo.PublicIP -and $sysInfo.PublicIP -ne "") { $sysInfo.PublicIP } else { "Unavailable" }
 $ispUi = if ($sysInfo.ISP -and $sysInfo.ISP -ne "") { $sysInfo.ISP } else { "Unavailable" }
-Add-LabelValueRow -Table $networkTable -RowIndex $netRowIndex -LabelText "Public IP:" -ValueText $publicIpUi -ValueColor $accentColor -RowHeight 20
+Add-LabelValueRow -Table $networkTable -RowIndex $netRowIndex -LabelText "Public IP:" -ValueText $publicIpUi -ValueColor $accentColor -LabelColorOverride $accentColor -RowHeight 20
 $netRowIndex++
 Add-LabelValueRow -Table $networkTable -RowIndex $netRowIndex -LabelText "ISP:" -ValueText $ispUi -RowHeight 20
 $netRowIndex++
@@ -1807,7 +1695,7 @@ if ($activeAdapters.Count -gt 0) {
         $netRowIndex++
         
         # IP Address (highlighted)
-        Add-LabelValueRow -Table $networkTable -RowIndex $netRowIndex -LabelText "IP Address:" -ValueText $adapter.IPAddress -ValueColor $accentColor -RowHeight 20
+        Add-LabelValueRow -Table $networkTable -RowIndex $netRowIndex -LabelText "IP Address:" -ValueText $adapter.IPAddress -ValueColor $accentColor -LabelColorOverride $accentColor -RowHeight 20
         $netRowIndex++
         
         # Gateway (reduced row height)
@@ -1918,8 +1806,8 @@ $footerTable.Controls.Add($exitButton, 3, 0)
 $footerPanel.Controls.Add($footerTable)
 
 # Add form controls
-$form.Controls.Add($rootTable)
 $form.Controls.Add($footerPanel)
+$form.Controls.Add($rootTable)
 
 # Calculate required width from actual table preferred sizes so content does not clip
 $deviceTable.PerformLayout()
@@ -1959,7 +1847,7 @@ $requiredHeight += 18  # Title height (AutoSize, reduced font)
 $requiredHeight += 1   # Divider
 $requiredHeight += 1   # Divider margin top (reduced)
 $requiredHeight += 3   # Divider margin bottom (reduced)
-$deviceRowCount = 6  # Computer, User, Domain, OS, Last Reboot, Uptime
+$deviceRowCount = 8  # Computer, User, Domain, Domain Joined, OS, Version, Last Reboot, Uptime
 $requiredHeight += ($deviceRowCount * 20)  # Rows (reduced from 22)
 $requiredHeight += 12  # Table padding (top + bottom: 6+6, reduced)
 $requiredHeight += 8   # Section spacing (reduced)
@@ -2023,7 +1911,7 @@ if ($activeAdapters.Count -gt 0) {
 $requiredHeight += 45  # Reduced from 50
 
 # Root padding bottom
-$requiredHeight += 6
+$requiredHeight += 10
 
 # Add buffer for form borders, title bar, etc. (increased to ensure all content is visible)
 $requiredHeight += 50
@@ -2033,11 +1921,11 @@ $requiredHeight += 50
 # Network section: Title/Divider + Public rows + Public divider + Adapter rows + TablePadding
 # Note: First adapter has NO top margin (only subsequent adapters do)
 # Always use maximum rows (5) to ensure Subnet and DNS are visible even if Subnet doesn't exist
-$minHeight = 6 + 18 + 1 + 1 + 3 + (6 * 20) + 12 + 8 +  # Device Info: RootPaddingTop(6) + Title(18) + Divider(1) + MarginTop(1) + MarginBottom(3) + Rows(6*20) + TablePadding(12) + SectionSpacing(8)
+$minHeight = 6 + 18 + 1 + 1 + 3 + (8 * 20) + 12 + 8 +  # Device Info: RootPaddingTop(6) + Title(18) + Divider(1) + MarginTop(1) + MarginBottom(3) + Rows(8*20) + TablePadding(12) + SectionSpacing(8)
              18 + 1 + 1 + 3 + (6 * 20) + 5 + 5 + 12 + 8 +  # Hardware: Title(18) + Divider(1) + MarginTop(1) + MarginBottom(3) + Rows(6*20) + Dividers(5+5) + TablePadding(12) + SectionSpacing(8)
              18 + 1 + 1 + 3 + 18 + 1 + (1 * 24) + 12 + 8 +  # Disk Info: Title(18) + Divider(1) + MarginTop(1) + MarginBottom(3) + HeaderRow(18) + Separator(1) + DataRows(1*24) + TablePadding(12) + SectionSpacing(8)
              18 + 1 + 1 + 3 + (2 * 20) + 7 + (7 * 20) + 12 +  # Network: Title/Divider + PublicRows + PublicDivider + AdapterRows(7*20 incl buffer) + TablePadding
-             45 + 6 + 50  # Footer(45) + RootPaddingBottom(6) + Buffer(50)
+             45 + 10 + 50  # Footer(45) + RootPaddingBottom(10) + Buffer(50)
 # Ensure height is at least enough to show all first adapter fields (always use minimum that includes all 5 rows)
 if ($requiredHeight -lt $minHeight) { $requiredHeight = $minHeight }
 $form.Height = $requiredHeight
