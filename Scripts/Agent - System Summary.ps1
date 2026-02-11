@@ -145,6 +145,126 @@ function Get-WmiCompat {
     }
 }
 
+function Get-HttpTextCompat {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Url,
+        [int]$TimeoutMs = 2500
+    )
+
+    try {
+        $request = [System.Net.HttpWebRequest]::Create($Url)
+        $request.Method = "GET"
+        $request.Timeout = $TimeoutMs
+        $request.ReadWriteTimeout = $TimeoutMs
+        $request.UserAgent = "CybrEdge-SystemSummary/1.0"
+
+        $response = $request.GetResponse()
+        try {
+            $stream = $response.GetResponseStream()
+            $reader = New-Object System.IO.StreamReader($stream)
+            try {
+                return $reader.ReadToEnd()
+            } finally {
+                $reader.Dispose()
+            }
+        } finally {
+            $response.Close()
+        }
+    } catch {
+        return $null
+    }
+}
+
+function Get-PublicNetworkInfo {
+    $result = @{
+        PublicIP = "Unavailable"
+        ISP = "Unavailable"
+    }
+
+    $endpoints = @(
+        "https://ipinfo.io/json",
+        "https://ipapi.co/json/"
+    )
+
+    foreach ($endpoint in $endpoints) {
+        $json = Get-HttpTextCompat -Url $endpoint -TimeoutMs 2500
+        if ([string]::IsNullOrWhiteSpace($json)) {
+            continue
+        }
+
+        $ipMatch = [regex]::Match($json, '"ip"\s*:\s*"(?<v>[^"]+)"')
+        $orgMatch = [regex]::Match($json, '"org"\s*:\s*"(?<v>[^"]+)"')
+        $ispMatch = [regex]::Match($json, '"isp"\s*:\s*"(?<v>[^"]+)"')
+
+        if ($ipMatch.Success -and -not [string]::IsNullOrWhiteSpace($ipMatch.Groups["v"].Value)) {
+            $result.PublicIP = $ipMatch.Groups["v"].Value.Trim()
+        }
+
+        $provider = ""
+        if ($orgMatch.Success) {
+            $provider = $orgMatch.Groups["v"].Value.Trim()
+        } elseif ($ispMatch.Success) {
+            $provider = $ispMatch.Groups["v"].Value.Trim()
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($provider)) {
+            $provider = $provider -replace '^AS\d+\s+', ''
+            $result.ISP = $provider
+        }
+
+        if ($result.PublicIP -ne "Unavailable") {
+            return $result
+        }
+    }
+
+    return $result
+}
+
+function Test-LoggedInUserIsAdmin {
+    param(
+        [string]$UserName,
+        [bool]$IsServiceContext = $false
+    )
+
+    # In normal user context, token role check is fastest and most reliable.
+    if (-not $IsServiceContext) {
+        try {
+            $principal = New-Object System.Security.Principal.WindowsPrincipal([System.Security.Principal.WindowsIdentity]::GetCurrent())
+            if ($principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
+                return $true
+            }
+        } catch {
+            # Fall through to group enumeration.
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($UserName) -or $UserName -eq "Unavailable") {
+        return $false
+    }
+
+    # Fallback check against local Administrators group membership.
+    try {
+        $groupOutput = cmd /c "net localgroup administrators" 2>$null
+        if ($groupOutput) {
+            $escapedUser = [regex]::Escape($UserName.Trim())
+            foreach ($line in $groupOutput) {
+                $entry = [string]$line
+                if ([string]::IsNullOrWhiteSpace($entry)) { continue }
+                $trimmed = $entry.Trim()
+                if ($trimmed -match '^(-+|Members|Alias name|Comment|The command completed successfully\.)') { continue }
+                if ($trimmed -match "(?i)^(?:[^\\]+\\)?$escapedUser$") {
+                    return $true
+                }
+            }
+        }
+    } catch {
+        # Ignore and return false below.
+    }
+
+    return $false
+}
+
 function Get-SystemInfo {
     $infoStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
@@ -289,6 +409,16 @@ function Get-SystemInfo {
     } catch {
         $domain = "Unavailable"
     }
+    try {
+        $isAdmin = Test-LoggedInUserIsAdmin -UserName $userName -IsServiceContext $isServiceContext
+    } catch {
+        $isAdmin = $false
+    }
+    try {
+        $domainJoined = if ($compSys -and $null -ne $compSys.PartOfDomain) { [bool]$compSys.PartOfDomain } else { $false }
+    } catch {
+        $domainJoined = $false
+    }
 
     # OS Info
     try {
@@ -316,6 +446,8 @@ function Get-SystemInfo {
         $osArch = "Unavailable"
         $lastReboot = Get-Date
         $uptime = "Unavailable"
+        $osBuildNumber = "Unavailable"
+        $osVersionNumber = "Unavailable"
         $osDetailedInfo = "OS information unavailable"
     }
 
@@ -374,6 +506,36 @@ function Get-SystemInfo {
     # Disk Info
     $disks = @()
     try {
+        # Build logical disk -> partition -> physical drive model mapping
+        # Use Get-WmiObject for association classes so Antecedent/Dependent are real objects (Get-CimInstance returns refs)
+        $partToModel = @{}
+        $logToPart = @{}
+        try {
+            $dd2dp = Get-WmiObject -Class Win32_DiskDriveToDiskPartition -ErrorAction SilentlyContinue
+            if ($dd2dp) {
+                foreach ($a in $dd2dp) {
+                    $drive = $a.Antecedent
+                    $part = $a.Dependent
+                    $partId = if ($part) { [string]$part.DeviceID } else { $null }
+                    $model = if ($drive -and $drive.Model) { [string]$drive.Model.Trim() } else { "-" }
+                    if ($partId) { $partToModel[$partId] = $model }
+                }
+            }
+            $ld2p = Get-WmiObject -Class Win32_LogicalDiskToPartition -ErrorAction SilentlyContinue
+            if ($ld2p) {
+                foreach ($a in $ld2p) {
+                    $part = $a.Antecedent
+                    $log = $a.Dependent
+                    $logId = if ($log) { [string]$log.DeviceID } else { $null }
+                    $partId = if ($part) { [string]$part.DeviceID } else { $null }
+                    if ($logId -and $partId) { $logToPart[$logId] = $partId }
+                }
+            }
+        } catch {
+            $partToModel = @{}
+            $logToPart = @{}
+        }
+
         $diskObjects = Get-WmiCompat -ClassName Win32_LogicalDisk -Filter "DriveType=3"
         foreach ($disk in $diskObjects) {
             $label = $disk.DeviceID
@@ -381,8 +543,11 @@ function Get-SystemInfo {
             $total = [math]::Round($disk.Size / 1GB, 2)
             $used = $total - $free
             $percentUsed = if ($total -gt 0) { [math]::Round(($used / $total) * 100, 1) } else { 0 }
+            $partId = if ($logToPart[$label]) { $logToPart[$label] } else { $null }
+            $model = if ($partId -and $partToModel[$partId]) { $partToModel[$partId] } else { "-" }
             $disks += @{
                 Label = $label
+                Model = $model
                 Free = $free
                 Total = $total
                 Used = $used
@@ -459,15 +624,21 @@ function Get-SystemInfo {
         $networkAdapters = @()
     }
 
+    $publicNetworkInfo = Get-PublicNetworkInfo
+
     $infoStopwatch.Stop()
     Write-RunLog "Get-SystemInfo completed in $($infoStopwatch.ElapsedMilliseconds) ms."
 
     return @{
         ComputerName = $computerName
         UserName = $userName
+        IsAdmin = $isAdmin
         Domain = $domain
+        DomainJoined = $domainJoined
         OSVersion = $osVersion
         OSArch = $osArch
+        OSBuildNumber = $osBuildNumber
+        OSVersionNumber = $osVersionNumber
         OSDetailedInfo = $osDetailedInfo
         LastReboot = $lastReboot
         Uptime = $uptime
@@ -478,6 +649,8 @@ function Get-SystemInfo {
         SystemModel = $sysModel
         Disks = $disks
         NetworkAdapters = $networkAdapters
+        PublicIP = $publicNetworkInfo.PublicIP
+        ISP = $publicNetworkInfo.ISP
     }
 }
 
@@ -613,6 +786,10 @@ function Format-SystemInfoForEmail {
     }
     
     $generatedDate = Get-Date -Format 'M/d/yyyy h:mm tt'
+    $userRoleSuffix = if ($SysInfo.IsAdmin) { " (administrator)" } else { " (non-administrator)" }
+    $userDisplay = if ([string]::IsNullOrWhiteSpace($SysInfo.UserName)) { "Unavailable$userRoleSuffix" } else { "$(Escape-Html $SysInfo.UserName)$userRoleSuffix" }
+    $publicIpDisplay = if ($SysInfo.PublicIP -and $SysInfo.PublicIP -ne "") { Escape-Html $SysInfo.PublicIP } else { "Unavailable" }
+    $ispDisplay = if ($SysInfo.ISP -and $SysInfo.ISP -ne "") { Escape-Html $SysInfo.ISP } else { "Unavailable" }
     
     $html = @"
 <!DOCTYPE html>
@@ -721,9 +898,12 @@ function Format-SystemInfoForEmail {
         .disk-table th:nth-child(1) {
             width: 60px;
         }
-        .disk-table th:nth-child(2),
+        .disk-table th:nth-child(2) {
+            width: 140px;
+        }
         .disk-table th:nth-child(3),
-        .disk-table th:nth-child(4) {
+        .disk-table th:nth-child(4),
+        .disk-table th:nth-child(5) {
             text-align: right;
             width: 100px;
         }
@@ -736,9 +916,14 @@ function Format-SystemInfoForEmail {
             font-weight: bold;
             width: 60px;
         }
-        .disk-table td:nth-child(2),
+        .disk-table td:nth-child(2) {
+            width: 140px;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+        }
         .disk-table td:nth-child(3),
-        .disk-table td:nth-child(4) {
+        .disk-table td:nth-child(4),
+        .disk-table td:nth-child(5) {
             text-align: right;
             font-variant-numeric: tabular-nums;
             width: 100px;
@@ -819,8 +1004,8 @@ function Format-SystemInfoForEmail {
                     <tr class="section-header">
                         <td colspan="2">DEVICE INFORMATION</td>
                     </tr>
-                    <tr><td>Computer:</td><td>$(Escape-Html $SysInfo.ComputerName)</td></tr>
-                    <tr><td>User:</td><td>$(Escape-Html $SysInfo.UserName)</td></tr>
+                    <tr><td>Computer:</td><td><span class='ip-address'>$(Escape-Html $SysInfo.ComputerName)</span></td></tr>
+                    <tr><td>User:</td><td>$userDisplay</td></tr>
                     <tr><td>Domain:</td><td>$(Escape-Html $SysInfo.Domain)</td></tr>
                     <tr><td>OS:</td><td>$osDisplay</td></tr>
                     <tr><td>Last Reboot:</td><td>$(Escape-Html $lastRebootFormatted)</td></tr>
@@ -845,7 +1030,7 @@ function Format-SystemInfoForEmail {
     }
     $html += "                    <tr><td>RAM:</td><td>$(Escape-Html $SysInfo.TotalRAM)</td></tr>`r`n"
     $html += "                    <tr><td>Cores:</td><td>$(Escape-Html $SysInfo.Cores)</td></tr>`r`n"
-    $html += "                    <tr><td>Connection:</td><td>$(Escape-Html $ConnectionType)</td></tr>`r`n"
+    $html += "                    <tr><td>Connection:</td><td><span class='ip-address'>$(Escape-Html $ConnectionType)</span></td></tr>`r`n"
     $html += "                    <tr><td>Model:</td><td>$(Escape-Html $SysInfo.SystemModel)</td></tr>`r`n"
     $html += "                </table>`r`n"
     $html += "            </td>`r`n"
@@ -861,13 +1046,16 @@ function Format-SystemInfoForEmail {
     if ($SysInfo.Disks.Count -gt 0) {
         $html += "                    <tr><td colspan='2'>`r`n"
         $html += "                        <table class='disk-table' style='width: 100%; table-layout: fixed; border-collapse: collapse;'>`r`n"
-        $html += "                            <tr><th>Drive</th><th>Total</th><th>Free</th><th>Usage</th></tr>`r`n"
+        $html += "                            <tr><th>Drive</th><th>Model</th><th>Total</th><th>Free</th><th>Usage</th></tr>`r`n"
         foreach ($disk in $SysInfo.Disks) {
             $percentUsed = [math]::Round($disk.PercentUsed, 0)
+            $freeColor = if ($percentUsed -ge 85) { "#dc3545" } elseif ($percentUsed -ge 70) { "#ffc107" } else { "#28a745" }
+            $modelDisplay = if ($disk.Model) { (Escape-Html $disk.Model) } else { "-" }
             $html += "                            <tr>`r`n"
             $html += "                                <td>$(Escape-Html $disk.Label)</td>`r`n"
+            $html += "                                <td>$modelDisplay</td>`r`n"
             $html += "                                <td>$([math]::Round($disk.Total, 1)) GB</td>`r`n"
-            $html += "                                <td>$([math]::Round($disk.Free, 1)) GB</td>`r`n"
+            $html += "                                <td style='color: $freeColor; font-weight: bold;'>$([math]::Round($disk.Free, 1)) GB</td>`r`n"
             $html += "                                <td>$percentUsed%</td>`r`n"
             $html += "                            </tr>`r`n"
         }
@@ -883,15 +1071,20 @@ function Format-SystemInfoForEmail {
     $html += "            <td colspan='4' style='padding: 4px;'>`r`n"
     $html += "                <table class='network-table' style='width: 100%; table-layout: fixed; border-collapse: collapse;'>`r`n"
     
+    # Check if any adapter has DNS servers
+    $hasDNS = ($ActiveAdapters | Where-Object { $_.DNSServers -ne "Unavailable" }).Count -gt 0
+    $colspan = if ($hasDNS) { 4 } else { 3 }
+
+    $html += "                    <tr class='section-header'>`r`n"
+    $html += "                        <td colspan='$colspan'>NETWORK</td>`r`n"
+    $html += "                    </tr>`r`n"
+    $html += "                    <tr><td colspan='$colspan' style='padding: 3px 6px;'><strong style='color:#666666;'>Public IP:</strong> <span class='ip-address'>$publicIpDisplay</span></td></tr>`r`n"
+    $html += "                    <tr><td colspan='$colspan' style='padding: 3px 6px;'><strong style='color:#666666;'>ISP:</strong> $ispDisplay</td></tr>`r`n"
+    $html += "                    <tr><td colspan='$colspan' style='padding: 3px 6px 0 6px;'></td></tr>`r`n"
+    $html += "                    <tr><td colspan='$colspan' style='padding: 0; border-top: 1px solid #e8e8e8;'></td></tr>`r`n"
+    $html += "                    <tr><td colspan='$colspan' style='padding: 0 6px 3px 6px;'></td></tr>`r`n"
+
     if ($ActiveAdapters.Count -gt 0) {
-        # Check if any adapter has DNS servers
-        $hasDNS = ($ActiveAdapters | Where-Object { $_.DNSServers -ne "Unavailable" }).Count -gt 0
-        $colspan = if ($hasDNS) { 4 } else { 3 }
-        
-        $html += "                    <tr class='section-header'>`r`n"
-        $html += "                        <td colspan='$colspan'>NETWORK</td>`r`n"
-        $html += "                    </tr>`r`n"
-        
         # Create horizontal network table with headers
         $html += "                    <tr>`r`n"
         $html += "                        <th style='width: 200px; padding: 3px 6px;'>Adapter</th>`r`n"
@@ -919,10 +1112,7 @@ function Format-SystemInfoForEmail {
             $html += "                    </tr>`r`n"
         }
     } else {
-        $html += "                    <tr class='section-header'>`r`n"
-        $html += "                        <td colspan='4'>NETWORK</td>`r`n"
-        $html += "                    </tr>`r`n"
-        $html += "                    <tr><td colspan='4' style='padding: 3px 6px;'>No active network adapters with valid gateway found</td></tr>`r`n"
+        $html += "                    <tr><td colspan='$colspan' style='padding: 3px 6px;'>No active network adapters with valid gateway found</td></tr>`r`n"
     }
     $html += "                </table>`r`n"
     $html += "            </td>`r`n"
@@ -1094,13 +1284,82 @@ $deviceTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([Syst
 $deviceRowIndex = 0
 
 # First group: Computer, User, Domain
-Add-LabelValueRow -Table $deviceTable -RowIndex $deviceRowIndex -LabelText "Computer Name:" -ValueText $sysInfo.ComputerName
+Add-LabelValueRow -Table $deviceTable -RowIndex $deviceRowIndex -LabelText "Computer Name:" -ValueText $sysInfo.ComputerName -ValueColor $accentColor
 $deviceRowIndex++
 # Ensure username is not null or empty before displaying
 $displayUserName = if ([string]::IsNullOrWhiteSpace($sysInfo.UserName)) { "Unavailable" } else { $sysInfo.UserName }
+if ($sysInfo.IsAdmin) {
+    $displayUserName = "$displayUserName (administrator)"
+} else {
+    $displayUserName = "$displayUserName (non-administrator)"
+}
 Add-LabelValueRow -Table $deviceTable -RowIndex $deviceRowIndex -LabelText "Logged-in User:" -ValueText $displayUserName
 $deviceRowIndex++
-Add-LabelValueRow -Table $deviceTable -RowIndex $deviceRowIndex -LabelText "Domain/Workgroup:" -ValueText $sysInfo.Domain
+
+# Domain/Workgroup row with expandable Domain Joined detail.
+$domainDisplay = if ([string]::IsNullOrWhiteSpace($sysInfo.Domain)) { "Unavailable" } else { $sysInfo.Domain }
+$domainJoinedUi = if ($sysInfo.DomainJoined) { "TRUE" } else { "FALSE" }
+$deviceTable.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 20))) | Out-Null
+
+$domainLabel = New-Object System.Windows.Forms.Label
+$domainLabel.Text = "Domain/Workgroup:"
+$domainLabel.Font = $labelFont
+$domainLabel.ForeColor = $labelColor
+$domainLabel.AutoSize = $true
+$domainLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
+$deviceTable.Controls.Add($domainLabel, 0, $deviceRowIndex)
+
+$domainValueLink = New-Object System.Windows.Forms.LinkLabel
+$domainValueLink.Text = "$domainDisplay [+]"
+$domainValueLink.Font = $valueFont
+$domainValueLink.ForeColor = $valueColor
+$domainValueLink.LinkColor = $headerColor
+$domainValueLink.ActiveLinkColor = $headerColor
+$domainValueLink.VisitedLinkColor = $headerColor
+$domainValueLink.LinkBehavior = [System.Windows.Forms.LinkBehavior]::NeverUnderline
+$domainValueLink.AutoSize = $true
+$domainValueLink.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+$domainValueLink.Margin = New-Object System.Windows.Forms.Padding(6, 0, 0, 0)
+$domainValueLink.Tag = $false
+$domainValueLink.LinkArea = New-Object System.Windows.Forms.LinkArea(($domainDisplay.Length + 1), 3)
+$deviceTable.Controls.Add($domainValueLink, 1, $deviceRowIndex)
+$deviceRowIndex++
+
+$domainDetailRowIndex = $deviceRowIndex
+$deviceTable.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 0))) | Out-Null
+$domainDetailValue = New-Object System.Windows.Forms.Label
+$domainDetailValue.Text = "> Domain Joined: $domainJoinedUi"
+$domainDetailValue.Font = New-Object System.Drawing.Font("Segoe UI", 7.5, [System.Drawing.FontStyle]::Regular)
+$domainDetailValue.ForeColor = [System.Drawing.Color]::FromArgb(110, 110, 110)
+$domainDetailValue.AutoSize = $true
+$domainDetailValue.Visible = $false
+$domainDetailValue.Margin = New-Object System.Windows.Forms.Padding(6, 0, 0, 0)
+$deviceTable.Controls.Add($domainDetailValue, 1, $domainDetailRowIndex)
+
+$domainValueLink.Add_LinkClicked({
+    $isExpanded = [bool]$domainValueLink.Tag
+    $isExpanded = -not $isExpanded
+    $domainValueLink.Tag = $isExpanded
+    if ($isExpanded) {
+        $domainValueLink.Text = "$domainDisplay [-]"
+        $domainLabel.ForeColor = $headerColor
+        $domainValueLink.ForeColor = $headerColor
+        $domainDetailValue.ForeColor = $headerColor
+        $domainDetailValue.Visible = $true
+        $deviceTable.RowStyles[$domainDetailRowIndex].Height = 18
+    } else {
+        $domainValueLink.Text = "$domainDisplay [+]"
+        $domainLabel.ForeColor = $labelColor
+        $domainValueLink.ForeColor = $valueColor
+        $domainDetailValue.ForeColor = [System.Drawing.Color]::FromArgb(110, 110, 110)
+        $domainDetailValue.Visible = $false
+        $deviceTable.RowStyles[$domainDetailRowIndex].Height = 0
+    }
+    $domainValueLink.LinkArea = New-Object System.Windows.Forms.LinkArea(($domainDisplay.Length + 1), 3)
+    $deviceTable.PerformLayout()
+    $rootTable.PerformLayout()
+    $form.PerformLayout()
+})
 $deviceRowIndex++
 
     # Small gap above divider
@@ -1122,7 +1381,7 @@ $deviceRowIndex++
     $deviceTable.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 3))) | Out-Null
 $deviceRowIndex++
 
-# Second group: OS (combined Version + Architecture)
+# Second group: Operating System with expandable details
 $osDisplay = if ($sysInfo.OSArch -ne "Unavailable" -and $sysInfo.OSVersion -ne "Unavailable") {
     "$($sysInfo.OSVersion) ($($sysInfo.OSArch))"
 } elseif ($sysInfo.OSVersion -ne "Unavailable") {
@@ -1130,7 +1389,70 @@ $osDisplay = if ($sysInfo.OSArch -ne "Unavailable" -and $sysInfo.OSVersion -ne "
 } else {
     "Unavailable"
 }
-Add-LabelValueRow -Table $deviceTable -RowIndex $deviceRowIndex -LabelText "OS:" -ValueText $osDisplay
+$osVersionDetail = if ($sysInfo.OSVersionNumber) { $sysInfo.OSVersionNumber } else { "Unavailable" }
+$osBuildDetail = if ($sysInfo.OSBuildNumber) { $sysInfo.OSBuildNumber } else { "Unavailable" }
+$osDetailText = "> Version: $osVersionDetail | Build: $osBuildDetail"
+$deviceTable.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 20))) | Out-Null
+
+$osLabel = New-Object System.Windows.Forms.Label
+$osLabel.Text = "Operating System:"
+$osLabel.Font = $labelFont
+$osLabel.ForeColor = $labelColor
+$osLabel.AutoSize = $true
+$osLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
+$deviceTable.Controls.Add($osLabel, 0, $deviceRowIndex)
+
+$osValueLink = New-Object System.Windows.Forms.LinkLabel
+$osValueLink.Text = "$osDisplay [+]"
+$osValueLink.Font = $valueFont
+$osValueLink.ForeColor = $valueColor
+$osValueLink.LinkColor = $headerColor
+$osValueLink.ActiveLinkColor = $headerColor
+$osValueLink.VisitedLinkColor = $headerColor
+$osValueLink.LinkBehavior = [System.Windows.Forms.LinkBehavior]::NeverUnderline
+$osValueLink.AutoSize = $true
+$osValueLink.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+$osValueLink.Margin = New-Object System.Windows.Forms.Padding(6, 0, 0, 0)
+$osValueLink.Tag = $false
+$osValueLink.LinkArea = New-Object System.Windows.Forms.LinkArea(($osDisplay.Length + 1), 3)
+$deviceTable.Controls.Add($osValueLink, 1, $deviceRowIndex)
+$deviceRowIndex++
+
+$osDetailRowIndex = $deviceRowIndex
+$deviceTable.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 0))) | Out-Null
+$osDetailValue = New-Object System.Windows.Forms.Label
+$osDetailValue.Text = $osDetailText
+$osDetailValue.Font = New-Object System.Drawing.Font("Segoe UI", 7.5, [System.Drawing.FontStyle]::Regular)
+$osDetailValue.ForeColor = [System.Drawing.Color]::FromArgb(110, 110, 110)
+$osDetailValue.AutoSize = $true
+$osDetailValue.Visible = $false
+$osDetailValue.Margin = New-Object System.Windows.Forms.Padding(6, 0, 0, 0)
+$deviceTable.Controls.Add($osDetailValue, 1, $osDetailRowIndex)
+
+$osValueLink.Add_LinkClicked({
+    $isExpanded = [bool]$osValueLink.Tag
+    $isExpanded = -not $isExpanded
+    $osValueLink.Tag = $isExpanded
+    if ($isExpanded) {
+        $osValueLink.Text = "$osDisplay [-]"
+        $osLabel.ForeColor = $headerColor
+        $osValueLink.ForeColor = $headerColor
+        $osDetailValue.ForeColor = $headerColor
+        $osDetailValue.Visible = $true
+        $deviceTable.RowStyles[$osDetailRowIndex].Height = 18
+    } else {
+        $osValueLink.Text = "$osDisplay [+]"
+        $osLabel.ForeColor = $labelColor
+        $osValueLink.ForeColor = $valueColor
+        $osDetailValue.ForeColor = [System.Drawing.Color]::FromArgb(110, 110, 110)
+        $osDetailValue.Visible = $false
+        $deviceTable.RowStyles[$osDetailRowIndex].Height = 0
+    }
+    $osValueLink.LinkArea = New-Object System.Windows.Forms.LinkArea(($osDisplay.Length + 1), 3)
+    $deviceTable.PerformLayout()
+    $rootTable.PerformLayout()
+    $form.PerformLayout()
+})
 $deviceRowIndex++
 
 # Third group: Last Reboot, Uptime
@@ -1222,7 +1544,7 @@ $hardwareRowIndex++
 $hardwareRowIndex++
 
 # Third group: Connection Type, System Model
-Add-LabelValueRow -Table $hardwareTable -RowIndex $hardwareRowIndex -LabelText "Connection Type:" -ValueText $connectionType
+Add-LabelValueRow -Table $hardwareTable -RowIndex $hardwareRowIndex -LabelText "Connection Type:" -ValueText $connectionType -ValueColor $accentColor
 $hardwareRowIndex++
 Add-LabelValueRow -Table $hardwareTable -RowIndex $hardwareRowIndex -LabelText "System Model:" -ValueText $sysInfo.SystemModel
 
@@ -1230,7 +1552,7 @@ Add-Section -Title "Hardware" -DataTable $hardwareTable
 
 # ===== DISK INFORMATION SECTION =====
 $diskTable = New-Object System.Windows.Forms.TableLayoutPanel
-$diskTable.ColumnCount = 4
+$diskTable.ColumnCount = 5
 $diskTable.RowCount = $sysInfo.Disks.Count + 2
 $diskTable.AutoSize = $true
 $diskTable.Dock = [System.Windows.Forms.DockStyle]::Top
@@ -1238,20 +1560,21 @@ $diskTable.BackColor = $contentColor
 $diskTable.Padding = New-Object System.Windows.Forms.Padding(8, 6, 10, 6)
 
 $diskTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, 50))) | Out-Null
+$diskTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, 140))) | Out-Null
 $diskTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, 90))) | Out-Null
 $diskTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, 90))) | Out-Null
 $diskTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100))) | Out-Null
 
 # Header row
 $diskTable.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 20))) | Out-Null
-$headerLabels = @("Drive", "Total", "Free", "Usage")
-for ($i = 0; $i -lt 4; $i++) {
+$headerLabels = @("Drive", "Model", "Total", "Free", "Usage")
+for ($i = 0; $i -lt 5; $i++) {
     $header = New-Object System.Windows.Forms.Label
     $header.Text = $headerLabels[$i]
     $header.Font = $labelFont
     $header.ForeColor = $labelColor
     $header.AutoSize = $true
-    if ($i -eq 0) {
+    if ($i -le 1) {
         $header.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
     } else {
         $header.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
@@ -1267,7 +1590,7 @@ $separatorRow.AutoSize = $false
 $separatorRow.Dock = [System.Windows.Forms.DockStyle]::Fill
 $diskTable.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 1))) | Out-Null
 $diskTable.Controls.Add($separatorRow, 0, 1)
-$diskTable.SetColumnSpan($separatorRow, 4)
+$diskTable.SetColumnSpan($separatorRow, 5)
 
 # Data rows
 $rowIndex = 2
@@ -1283,23 +1606,35 @@ foreach ($disk in $sysInfo.Disks) {
     $driveLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
     $diskTable.Controls.Add($driveLabel, 0, $rowIndex)
     
-    # Total (right-aligned) - swapped position
+    # Model (left-aligned)
+    $modelLabel = New-Object System.Windows.Forms.Label
+    $modelLabel.Text = if ($disk.Model) { $disk.Model } else { "-" }
+    $modelLabel.Font = $valueFont
+    $modelLabel.ForeColor = $valueColor
+    $modelLabel.AutoSize = $true
+    $modelLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+    $modelLabel.AutoEllipsis = $true
+    $diskTable.Controls.Add($modelLabel, 1, $rowIndex)
+    
+    # Total (right-aligned)
     $totalLabel = New-Object System.Windows.Forms.Label
     $totalLabel.Text = "{0:N1} GB" -f $disk.Total
     $totalLabel.Font = $valueFont
     $totalLabel.ForeColor = $valueColor
     $totalLabel.AutoSize = $true
     $totalLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
-    $diskTable.Controls.Add($totalLabel, 1, $rowIndex)
+    $diskTable.Controls.Add($totalLabel, 2, $rowIndex)
     
-    # Free (right-aligned) - swapped position
+    # Free (right-aligned) - colored by usage (same thresholds as bar: green <70%, yellow 70-85%, red >=85%)
+    $percentUsed = [math]::Round($disk.PercentUsed, 0)
+    $freeColor = if ($percentUsed -ge 85) { [System.Drawing.Color]::FromArgb(220, 53, 69) } elseif ($percentUsed -ge 70) { [System.Drawing.Color]::FromArgb(255, 193, 7) } else { [System.Drawing.Color]::FromArgb(40, 167, 69) }
     $freeLabel = New-Object System.Windows.Forms.Label
     $freeLabel.Text = "{0:N1} GB" -f $disk.Free
     $freeLabel.Font = $valueFont
-    $freeLabel.ForeColor = $valueColor
+    $freeLabel.ForeColor = $freeColor
     $freeLabel.AutoSize = $true
     $freeLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
-    $diskTable.Controls.Add($freeLabel, 2, $rowIndex)
+    $diskTable.Controls.Add($freeLabel, 3, $rowIndex)
     
     # Usage Bar container
     $barContainer = New-Object System.Windows.Forms.TableLayoutPanel
@@ -1311,9 +1646,7 @@ foreach ($disk in $sysInfo.Disks) {
     $barContainer.Padding = New-Object System.Windows.Forms.Padding(0, 4, 0, 4)
     $barContainer.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 20))) | Out-Null
     
-    $percentUsed = [math]::Round($disk.PercentUsed, 0)
-    $barColor = if ($percentUsed -ge 85) { [System.Drawing.Color]::FromArgb(220, 53, 69) } elseif ($percentUsed -ge 70) { [System.Drawing.Color]::FromArgb(255, 193, 7) } else { [System.Drawing.Color]::FromArgb(40, 167, 69) }
-    
+    $barColor = $freeColor
     # Background track panel (faint background)
     $trackPanel = New-Object System.Windows.Forms.Panel
     $trackPanel.BackColor = [System.Drawing.Color]::FromArgb(230, 230, 230)  # Faint gray background track
@@ -1344,7 +1677,7 @@ foreach ($disk in $sysInfo.Disks) {
     $percentLabel.Dock = [System.Windows.Forms.DockStyle]::Fill
     $barContainer.Controls.Add($percentLabel, 1, 0)
     
-    $diskTable.Controls.Add($barContainer, 3, $rowIndex)
+    $diskTable.Controls.Add($barContainer, 4, $rowIndex)
     
     $rowIndex++
 }
@@ -1362,6 +1695,28 @@ $networkTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([Sys
 $networkTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize))) | Out-Null
 
 $netRowIndex = 0
+
+$publicIpUi = if ($sysInfo.PublicIP -and $sysInfo.PublicIP -ne "") { $sysInfo.PublicIP } else { "Unavailable" }
+$ispUi = if ($sysInfo.ISP -and $sysInfo.ISP -ne "") { $sysInfo.ISP } else { "Unavailable" }
+Add-LabelValueRow -Table $networkTable -RowIndex $netRowIndex -LabelText "Public IP:" -ValueText $publicIpUi -ValueColor $accentColor -RowHeight 20
+$netRowIndex++
+Add-LabelValueRow -Table $networkTable -RowIndex $netRowIndex -LabelText "ISP:" -ValueText $ispUi -RowHeight 20
+$netRowIndex++
+
+# Divider between internet identity and adapter details.
+$networkTable.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 3))) | Out-Null
+$netRowIndex++
+$networkDividerTop = New-Object System.Windows.Forms.Label
+$networkDividerTop.Height = 1
+$networkDividerTop.BackColor = $dividerColor
+$networkDividerTop.AutoSize = $false
+$networkDividerTop.Dock = [System.Windows.Forms.DockStyle]::Fill
+$networkTable.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 1))) | Out-Null
+$networkTable.Controls.Add($networkDividerTop, 0, $netRowIndex)
+$networkTable.SetColumnSpan($networkDividerTop, 2)
+$netRowIndex++
+$networkTable.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 3))) | Out-Null
+$netRowIndex++
 
 if ($activeAdapters.Count -gt 0) {
     $adapterIndex = 0
@@ -1595,6 +1950,8 @@ $requiredHeight += 18  # Title height (reduced font)
 $requiredHeight += 1   # Divider
 $requiredHeight += 1   # Divider margin top (reduced)
 $requiredHeight += 3   # Divider margin bottom (reduced)
+$requiredHeight += (2 * 20)  # Public IP + ISP
+$requiredHeight += 7   # Public info divider spacing (3 + 1 + 3)
 if ($activeAdapters.Count -gt 0) {
     # First adapter has NO top margin (only subsequent adapters do)
     # Count all rows for first adapter: Adapter name, IP Address, Gateway (always shown), Subnet (if exists), DNS Servers (always shown)
@@ -1627,13 +1984,13 @@ $requiredHeight += 50
 
 # Ensure minimum height to display Device Info, Hardware, Disk Info, Network section, and ALL fields of first adapter
 # With reduced sizes, calculate a more accurate minimum that includes all adapter fields
-# Network section: Title(18) + Divider(1) + DividerMarginTop(1) + DividerMarginBottom(3) + AdapterRows(5*20) + TablePadding(12) = 18+1+1+3+100+12 = 135
+# Network section: Title/Divider + Public rows + Public divider + Adapter rows + TablePadding
 # Note: First adapter has NO top margin (only subsequent adapters do)
 # Always use maximum rows (5) to ensure Subnet and DNS are visible even if Subnet doesn't exist
 $minHeight = 6 + 18 + 1 + 1 + 3 + (6 * 20) + 12 + 8 +  # Device Info: RootPaddingTop(6) + Title(18) + Divider(1) + MarginTop(1) + MarginBottom(3) + Rows(6*20) + TablePadding(12) + SectionSpacing(8)
              18 + 1 + 1 + 3 + (6 * 20) + 5 + 5 + 12 + 8 +  # Hardware: Title(18) + Divider(1) + MarginTop(1) + MarginBottom(3) + Rows(6*20) + Dividers(5+5) + TablePadding(12) + SectionSpacing(8)
              18 + 1 + 1 + 3 + 18 + 1 + (1 * 24) + 12 + 8 +  # Disk Info: Title(18) + Divider(1) + MarginTop(1) + MarginBottom(3) + HeaderRow(18) + Separator(1) + DataRows(1*24) + TablePadding(12) + SectionSpacing(8)
-             18 + 1 + 1 + 3 + (7 * 20) + 12 +  # Network: Title(18) + Divider(1) + MarginTop(1) + MarginBottom(3) + AdapterRows(7*20: 5 actual + 2 buffer for AutoSize/RoundedPanel) + TablePadding(12) - NO top margin for first adapter
+             18 + 1 + 1 + 3 + (2 * 20) + 7 + (7 * 20) + 12 +  # Network: Title/Divider + PublicRows + PublicDivider + AdapterRows(7*20 incl buffer) + TablePadding
              45 + 6 + 50  # Footer(45) + RootPaddingBottom(6) + Buffer(50)
 # Ensure height is at least enough to show all first adapter fields (always use minimum that includes all 5 rows)
 if ($requiredHeight -lt $minHeight) { $requiredHeight = $minHeight }
