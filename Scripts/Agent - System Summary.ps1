@@ -265,6 +265,68 @@ function Test-LoggedInUserIsAdmin {
     return $false
 }
 
+function Get-ActiveAntivirusDisplay {
+    # Returns a display string such as "Huntress | Malwarebytes" or "Unavailable"
+    $names = @()
+
+    # SecurityCenter2 (Vista+; most modern Windows clients)
+    try {
+        $products = @()
+        if ($script:canUseCim) {
+            $products = @(Get-CimInstance -Namespace "root/SecurityCenter2" -ClassName "AntiVirusProduct" -ErrorAction SilentlyContinue)
+        } else {
+            $products = @(Get-WmiObject -Namespace "root/SecurityCenter2" -Class "AntiVirusProduct" -ErrorAction SilentlyContinue)
+        }
+
+        foreach ($p in $products) {
+            if (-not $p -or -not $p.displayName) { continue }
+            $name = [string]$p.displayName
+            $isActive = $true
+            if ($null -ne $p.productState) {
+                # Heuristic used in many WSC scripts: 0x1000 bit indicates enabled/on.
+                $isActive = (([int]$p.productState -band 0x1000) -ne 0)
+            }
+            if ($isActive) {
+                $names += $name
+            }
+        }
+    } catch {
+        # Continue to fallback namespace below.
+    }
+
+    # Legacy SecurityCenter fallback (older systems)
+    if ($names.Count -eq 0) {
+        try {
+            $legacyProducts = @()
+            if ($script:canUseCim) {
+                $legacyProducts = @(Get-CimInstance -Namespace "root/SecurityCenter" -ClassName "AntiVirusProduct" -ErrorAction SilentlyContinue)
+            } else {
+                $legacyProducts = @(Get-WmiObject -Namespace "root/SecurityCenter" -Class "AntiVirusProduct" -ErrorAction SilentlyContinue)
+            }
+
+            foreach ($p in $legacyProducts) {
+                if (-not $p -or -not $p.displayName) { continue }
+                $name = [string]$p.displayName
+                $isActive = $true
+                if ($null -ne $p.onAccessScanningEnabled) {
+                    $isActive = [bool]$p.onAccessScanningEnabled
+                }
+                if ($isActive) {
+                    $names += $name
+                }
+            }
+        } catch {
+            # No AV namespace/product info available on this system.
+        }
+    }
+
+    $uniqueNames = @($names | Where-Object { $_ -and $_.Trim() -ne "" } | Select-Object -Unique)
+    if ($uniqueNames.Count -gt 0) {
+        return ($uniqueNames -join " | ")
+    }
+    return "Unavailable"
+}
+
 function Get-SystemInfo {
     $infoStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
@@ -330,6 +392,7 @@ function Get-SystemInfo {
                 # Get all logged-on user associations
                 $loggedOnUsers = Get-WmiCompat -ClassName Win32_LoggedOnUser
                 if ($loggedOnUsers) {
+                    $sidAccountCache = @{}
                     foreach ($session in $logonSessions) {
                         foreach ($lu in $loggedOnUsers) {
                             # Check if this logged-on user matches this session
@@ -340,7 +403,12 @@ function Get-SystemInfo {
                                 # Extract SID from the reference string
                                 if ($accountSid -match 'SID="([^"]+)"') {
                                     $sid = $matches[1]
-                                    $account = Get-WmiCompat -ClassName Win32_Account -Filter "SID='$sid'" | Select-Object -First 1
+                                    if ($sidAccountCache.ContainsKey($sid)) {
+                                        $account = $sidAccountCache[$sid]
+                                    } else {
+                                        $account = Get-WmiCompat -ClassName Win32_Account -Filter "SID='$sid'" | Select-Object -First 1
+                                        $sidAccountCache[$sid] = $account
+                                    }
                                     if ($account -and $account.Name -and ($serviceAccountNames -notcontains $account.Name.ToUpper()) -and $account.Domain -ne "NT AUTHORITY") {
                                         $userName = $account.Name
                                         break
@@ -503,18 +571,16 @@ function Get-SystemInfo {
         $sysModel = "Unavailable"
     }
 
+    # Anti-Virus (active products)
+    try {
+        $activeAntivirus = Get-ActiveAntivirusDisplay
+    } catch {
+        $activeAntivirus = "Unavailable"
+    }
+
     # Disk Info
     $disks = @()
     try {
-        function Get-DiskTypeFromText {
-            param([string]$Text)
-            if ([string]::IsNullOrWhiteSpace($Text)) { return "Unknown" }
-            $t = $Text.ToUpperInvariant()
-            if ($t -match 'SSD|NVME|SOLID STATE|M\.2') { return "SSD" }
-            if ($t -match 'HDD|HARD DISK|ROTATIONAL') { return "HDD" }
-            return "Unknown"
-        }
-
         # Simple model source (as requested): Get disk models directly from Win32_DiskDrive.
         $allPhysicalDrives = @(Get-WmiCompat -ClassName Win32_DiskDrive)
         $allPhysicalModels = @(
@@ -552,7 +618,6 @@ function Get-SystemInfo {
         # Build logical disk -> partition -> physical drive mapping (for per-drive model/type when available).
         # Use Get-WmiObject for association classes so Antecedent/Dependent are real objects.
         $partToModel = @{}
-        $partToType = @{}
         $logToPart = @{}
         try {
             $dd2dp = Get-WmiObject -Class Win32_DiskDriveToDiskPartition -ErrorAction SilentlyContinue
@@ -562,11 +627,8 @@ function Get-SystemInfo {
                     $part = $a.Dependent
                     $partId = if ($part) { [string]$part.DeviceID } else { $null }
                     $model = if ($drive -and $drive.Model) { [string]$drive.Model.Trim() } else { $fallbackModel }
-                    $typeText = "{0} {1} {2}" -f ([string]$drive.MediaType), ([string]$drive.Model), ([string]$drive.InterfaceType)
-                    $diskType = Get-DiskTypeFromText -Text $typeText
                     if ($partId) {
                         $partToModel[$partId] = $model
-                        $partToType[$partId] = $diskType
                     }
                 }
             }
@@ -582,10 +644,10 @@ function Get-SystemInfo {
             }
         } catch {
             $partToModel = @{}
-            $partToType = @{}
             $logToPart = @{}
         }
 
+        $modelLookupCache = @{}
         $diskObjects = Get-WmiCompat -ClassName Win32_LogicalDisk -Filter "DriveType=3"
         foreach ($disk in $diskObjects) {
             $label = $disk.DeviceID
@@ -596,15 +658,18 @@ function Get-SystemInfo {
             $partId = if ($logToPart[$label]) { $logToPart[$label] } else { $null }
             $model = if ($partId -and $partToModel[$partId]) { $partToModel[$partId] } else { $null }
             if (-not $model -or $model -eq "") {
-                $model = Get-ModelFromLogicalDisk -LogicalDiskId $label
+                if ($modelLookupCache.ContainsKey($label)) {
+                    $model = $modelLookupCache[$label]
+                } else {
+                    $model = Get-ModelFromLogicalDisk -LogicalDiskId $label
+                    $modelLookupCache[$label] = $model
+                }
             }
             if (-not $model -or $model -eq "") {
                 $model = $fallbackModel
             }
-            $diskType = if ($partId -and $partToType[$partId]) { $partToType[$partId] } else { "Unknown" }
             $disks += @{
                 Label = $label
-                DiskType = $diskType
                 Model = $model
                 Free = $free
                 Total = $total
@@ -705,6 +770,7 @@ function Get-SystemInfo {
         Cores = $coresDisplay
         GPUs = $gpus
         SystemModel = $sysModel
+        ActiveAntivirus = $activeAntivirus
         Disks = $disks
         NetworkAdapters = $networkAdapters
         PublicIP = $publicNetworkInfo.PublicIP
@@ -714,7 +780,7 @@ function Get-SystemInfo {
 
 # Colors
 $headerColor = [System.Drawing.Color]::FromArgb(0, 70, 140)      # Blue
-$accentColor = [System.Drawing.Color]::FromArgb(255, 140, 0)     # Orange
+$accentColor = [System.Drawing.Color]::FromArgb(15, 15, 15)      # Match normal value black
 $labelColor = [System.Drawing.Color]::FromArgb(100, 100, 100)    # Medium gray (consistent, readable)
 $valueColor = [System.Drawing.Color]::FromArgb(15, 15, 15)       # Darker near-black for values
 $adapterHeaderColor = [System.Drawing.Color]::FromArgb(70, 70, 70)  # Slightly darker for adapter names
@@ -912,7 +978,7 @@ function Format-SystemInfoForEmail {
             font-size: 7pt;
         }
         .section-table td:first-child {
-            font-weight: bold;
+            font-weight: normal;
             color: #666666;
             width: 90px;
             background-color: #f8f8f8;
@@ -920,6 +986,7 @@ function Format-SystemInfoForEmail {
         }
         .section-table td:last-child {
             color: #1a1a1a;
+            font-weight: bold;
             word-wrap: break-word;
             max-width: 200px;
         }
@@ -1036,7 +1103,7 @@ function Format-SystemInfoForEmail {
             text-overflow: ellipsis;
         }
         .ip-address {
-            color: #ff8c00;
+            color: #1a1a1a;
             font-weight: bold;
         }
         .footer {
@@ -1066,8 +1133,8 @@ function Format-SystemInfoForEmail {
                     <tr><td>User:</td><td>$userDisplay</td></tr>
                     <tr><td>Domain:</td><td>$(Escape-Html $SysInfo.Domain)</td></tr>
                     <tr><td>OS:</td><td>$osDisplay</td></tr>
-                    <tr><td>Last Reboot:</td><td>$(Escape-Html $lastRebootFormatted)</td></tr>
-                    <tr><td>Uptime:</td><td>$(Escape-Html $SysInfo.Uptime)</td></tr>
+                    <tr><td>Anti-Virus:</td><td>$(Escape-Html $SysInfo.ActiveAntivirus)</td></tr>
+                    <tr><td>Last Reboot / Uptime:</td><td>$(Escape-Html $lastRebootFormatted) | $(Escape-Html $SysInfo.Uptime)</td></tr>
                 </table>
             </td>
             <td colspan="2" style="width: 50%; padding: 4px; vertical-align: top;">
@@ -1109,11 +1176,13 @@ function Format-SystemInfoForEmail {
             $percentUsed = [math]::Round($disk.PercentUsed, 0)
             $freeColor = if ($percentUsed -ge 85) { "#dc3545" } elseif ($percentUsed -ge 70) { "#ffc107" } else { "#28a745" }
             $modelDisplay = if ($disk.Model) { (Escape-Html $disk.Model) } else { "-" }
+            $totalDisplay = if ($disk.Total -lt 1) { ("{0:N1} GB" -f $disk.Total) } else { ("{0:N0} GB" -f [math]::Round($disk.Total, 0)) }
+            $freeDisplay = if ($disk.Free -lt 1) { ("{0:N1} GB" -f $disk.Free) } else { ("{0:N0} GB" -f [math]::Round($disk.Free, 0)) }
             $html += "                            <tr>`r`n"
             $html += "                                <td>$(Escape-Html $disk.Label)</td>`r`n"
             $html += "                                <td>$modelDisplay</td>`r`n"
-            $html += "                                <td>$([math]::Round($disk.Total, 1)) GB</td>`r`n"
-            $html += "                                <td style='color: $freeColor; font-weight: bold;'>$([math]::Round($disk.Free, 1)) GB</td>`r`n"
+            $html += "                                <td>$totalDisplay</td>`r`n"
+            $html += "                                <td style='color: $freeColor; font-weight: bold;'>$freeDisplay</td>`r`n"
             $html += "                                <td>$percentUsed%</td>`r`n"
             $html += "                            </tr>`r`n"
         }
@@ -1136,8 +1205,8 @@ function Format-SystemInfoForEmail {
     $html += "                    <tr class='section-header'>`r`n"
     $html += "                        <td colspan='$colspan'>NETWORK</td>`r`n"
     $html += "                    </tr>`r`n"
-    $html += "                    <tr><td colspan='$colspan' style='padding: 3px 6px;'><strong style='color:#666666;'>Public IP:</strong> <span class='ip-address'>$publicIpDisplay</span></td></tr>`r`n"
-    $html += "                    <tr><td colspan='$colspan' style='padding: 3px 6px;'><strong style='color:#666666;'>ISP:</strong> $ispDisplay</td></tr>`r`n"
+    $html += "                    <tr><td colspan='$colspan' style='padding: 3px 6px;'><span style='color:#666666;'>Public IP:</span> <span class='ip-address'>$publicIpDisplay</span></td></tr>`r`n"
+    $html += "                    <tr><td colspan='$colspan' style='padding: 3px 6px;'><span style='color:#666666;'>ISP:</span> $ispDisplay</td></tr>`r`n"
     $html += "                    <tr><td colspan='$colspan' style='padding: 3px 6px 0 6px;'></td></tr>`r`n"
     $html += "                    <tr><td colspan='$colspan' style='padding: 0; border-top: 1px solid #e8e8e8;'></td></tr>`r`n"
     $html += "                    <tr><td colspan='$colspan' style='padding: 0 6px 3px 6px;'></td></tr>`r`n"
@@ -1343,7 +1412,7 @@ $deviceTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([Syst
 $deviceRowIndex = 0
 
 # First group: Computer, User, Domain
-Add-LabelValueRow -Table $deviceTable -RowIndex $deviceRowIndex -LabelText "Computer Name:" -ValueText $sysInfo.ComputerName -ValueColor $accentColor -LabelColorOverride $accentColor
+Add-LabelValueRow -Table $deviceTable -RowIndex $deviceRowIndex -LabelText "Computer Name:" -ValueText $sysInfo.ComputerName
 $deviceRowIndex++
 # Ensure username is not null or empty before displaying
 $displayUserName = if ([string]::IsNullOrWhiteSpace($sysInfo.UserName)) { "Unavailable" } else { $sysInfo.UserName }
@@ -1390,7 +1459,7 @@ $osDisplay = if ($sysInfo.OSArch -ne "Unavailable" -and $sysInfo.OSVersion -ne "
 } else {
     "Unavailable"
 }
-Add-LabelValueRow -Table $deviceTable -RowIndex $deviceRowIndex -LabelText "Operating System:" -ValueText $osDisplay -ValueColor $accentColor -LabelColorOverride $accentColor
+Add-LabelValueRow -Table $deviceTable -RowIndex $deviceRowIndex -LabelText "Operating System:" -ValueText $osDisplay
 $deviceRowIndex++
 $osVersionDetail = if ([string]::IsNullOrWhiteSpace($sysInfo.OSVersionNumber)) { "Unavailable" } else { $sysInfo.OSVersionNumber }
 $osBuildDetail = if ([string]::IsNullOrWhiteSpace($sysInfo.OSBuildNumber)) { "" } else { " Build $($sysInfo.OSBuildNumber)" }
@@ -1401,8 +1470,10 @@ if ($osVersionDetail -eq "Unavailable") {
 }
 Add-LabelValueRow -Table $deviceTable -RowIndex $deviceRowIndex -LabelText "Version:" -ValueText $osVersionLine
 $deviceRowIndex++
+Add-LabelValueRow -Table $deviceTable -RowIndex $deviceRowIndex -LabelText "Anti-Virus:" -ValueText $sysInfo.ActiveAntivirus
+$deviceRowIndex++
 
-# Third group: Last Reboot, Uptime
+# Third group: Last Reboot + Uptime (combined)
 # Format Last Reboot with 2-digit year and timezone
 $timezone = [TimeZoneInfo]::Local
 $timezoneAbbr = if ($timezone.Id -match 'Eastern') { if ($timezone.IsDaylightSavingTime($sysInfo.LastReboot)) { 'EDT' } else { 'EST' } }
@@ -1413,9 +1484,7 @@ $timezoneAbbr = if ($timezone.Id -match 'Eastern') { if ($timezone.IsDaylightSav
                 elseif ($timezone.Id -match 'Hawaii') { 'HST' }
                 else { $timezone.Id }
 $lastRebootFormatted = $sysInfo.LastReboot.ToString("M/d/yy h:mm tt") + " " + $timezoneAbbr
-Add-LabelValueRow -Table $deviceTable -RowIndex $deviceRowIndex -LabelText "Last Reboot:" -ValueText $lastRebootFormatted
-$deviceRowIndex++
-Add-LabelValueRow -Table $deviceTable -RowIndex $deviceRowIndex -LabelText "Uptime:" -ValueText $sysInfo.Uptime
+Add-LabelValueRow -Table $deviceTable -RowIndex $deviceRowIndex -LabelText "Last Reboot / Uptime:" -ValueText "$lastRebootFormatted | $($sysInfo.Uptime)"
 
 Add-Section -Title "Device Information" -DataTable $deviceTable
 
@@ -1491,7 +1560,7 @@ $hardwareRowIndex++
 $hardwareRowIndex++
 
 # Third group: Connection Type, System Model
-Add-LabelValueRow -Table $hardwareTable -RowIndex $hardwareRowIndex -LabelText "Connection Type:" -ValueText $connectionType -ValueColor $accentColor -LabelColorOverride $accentColor
+Add-LabelValueRow -Table $hardwareTable -RowIndex $hardwareRowIndex -LabelText "Connection Type:" -ValueText $connectionType
 $hardwareRowIndex++
 Add-LabelValueRow -Table $hardwareTable -RowIndex $hardwareRowIndex -LabelText "System Model:" -ValueText $sysInfo.SystemModel
 
@@ -1564,7 +1633,7 @@ foreach ($disk in $sysInfo.Disks) {
     
     # Total (right-aligned)
     $totalLabel = New-Object System.Windows.Forms.Label
-    $totalLabel.Text = "{0:N1} GB" -f $disk.Total
+    $totalLabel.Text = if ($disk.Total -lt 1) { ("{0:N1} GB" -f $disk.Total) } else { ("{0:N0} GB" -f [math]::Round($disk.Total, 0)) }
     $totalLabel.Font = $valueFont
     $totalLabel.ForeColor = $valueColor
     $totalLabel.AutoSize = $true
@@ -1575,7 +1644,7 @@ foreach ($disk in $sysInfo.Disks) {
     $percentUsed = [math]::Round($disk.PercentUsed, 0)
     $freeColor = if ($percentUsed -ge 85) { [System.Drawing.Color]::FromArgb(220, 53, 69) } elseif ($percentUsed -ge 70) { [System.Drawing.Color]::FromArgb(255, 193, 7) } else { [System.Drawing.Color]::FromArgb(40, 167, 69) }
     $freeLabel = New-Object System.Windows.Forms.Label
-    $freeLabel.Text = "{0:N1} GB" -f $disk.Free
+    $freeLabel.Text = if ($disk.Free -lt 1) { ("{0:N1} GB" -f $disk.Free) } else { ("{0:N0} GB" -f [math]::Round($disk.Free, 0)) }
     $freeLabel.Font = $valueFont
     $freeLabel.ForeColor = $freeColor
     $freeLabel.AutoSize = $true
@@ -1644,7 +1713,7 @@ $netRowIndex = 0
 
 $publicIpUi = if ($sysInfo.PublicIP -and $sysInfo.PublicIP -ne "") { $sysInfo.PublicIP } else { "Unavailable" }
 $ispUi = if ($sysInfo.ISP -and $sysInfo.ISP -ne "") { $sysInfo.ISP } else { "Unavailable" }
-Add-LabelValueRow -Table $networkTable -RowIndex $netRowIndex -LabelText "Public IP:" -ValueText $publicIpUi -ValueColor $accentColor -LabelColorOverride $accentColor -RowHeight 20
+Add-LabelValueRow -Table $networkTable -RowIndex $netRowIndex -LabelText "Public IP:" -ValueText $publicIpUi -RowHeight 20
 $netRowIndex++
 Add-LabelValueRow -Table $networkTable -RowIndex $netRowIndex -LabelText "ISP:" -ValueText $ispUi -RowHeight 20
 $netRowIndex++
@@ -1695,7 +1764,7 @@ if ($activeAdapters.Count -gt 0) {
         $netRowIndex++
         
         # IP Address (highlighted)
-        Add-LabelValueRow -Table $networkTable -RowIndex $netRowIndex -LabelText "IP Address:" -ValueText $adapter.IPAddress -ValueColor $accentColor -LabelColorOverride $accentColor -RowHeight 20
+        Add-LabelValueRow -Table $networkTable -RowIndex $netRowIndex -LabelText "IP Address:" -ValueText $adapter.IPAddress -RowHeight 20
         $netRowIndex++
         
         # Gateway (reduced row height)
@@ -1847,7 +1916,7 @@ $requiredHeight += 18  # Title height (AutoSize, reduced font)
 $requiredHeight += 1   # Divider
 $requiredHeight += 1   # Divider margin top (reduced)
 $requiredHeight += 3   # Divider margin bottom (reduced)
-$deviceRowCount = 8  # Computer, User, Domain, Domain Joined, OS, Version, Last Reboot, Uptime
+$deviceRowCount = 8  # Computer, User, Domain, Domain Joined, OS, Version, Anti-Virus, Last Reboot/Uptime
 $requiredHeight += ($deviceRowCount * 20)  # Rows (reduced from 22)
 $requiredHeight += 12  # Table padding (top + bottom: 6+6, reduced)
 $requiredHeight += 8   # Section spacing (reduced)
