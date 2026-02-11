@@ -1,83 +1,120 @@
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
+param(
+    [switch]$StaRelaunch,
+    [switch]$DesktopRelaunch,
+    [switch]$UiProcess,
+    [switch]$UseDedicatedUiProcess
+)
 
-# Custom Panel class with rounded corners and border
-Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing -TypeDefinition @"
-using System;
-using System.Drawing;
-using System.Drawing.Drawing2D;
-using System.Windows.Forms;
+$script:logFile = Join-Path $env:TEMP "CybrEdge-SystemSummary.log"
 
-public class RoundedPanel : Panel
-{
-    private Color borderColor = Color.FromArgb(220, 220, 220);
-    private int borderRadius = 6;
-    private int borderWidth = 1;
-
-    public Color BorderColor
-    {
-        get { return borderColor; }
-        set { borderColor = value; Invalidate(); }
+function Write-RunLog {
+    param([string]$Message)
+    try {
+        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        Add-Content -Path $script:logFile -Value "[$timestamp] $Message" -ErrorAction SilentlyContinue
+    } catch {
+        # Avoid throwing from logging helper
     }
+}
 
-    public int BorderRadius
-    {
-        get { return borderRadius; }
-        set { borderRadius = value; Invalidate(); }
-    }
+try {
+    $script:currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+} catch {
+    $script:currentIdentity = "Unavailable"
+}
+Write-RunLog "Script launch. User=$env:USERNAME Identity=$script:currentIdentity Interactive=$([Environment]::UserInteractive) Apartment=$([Threading.Thread]::CurrentThread.ApartmentState)"
 
-    public int BorderWidth
-    {
-        get { return borderWidth; }
-        set { borderWidth = value; Invalidate(); }
-    }
-
-    public RoundedPanel()
-    {
-        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.DoubleBuffer | ControlStyles.ResizeRedraw, true);
-    }
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        base.OnPaint(e);
-        
-        Graphics g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        
-        Rectangle rect = new Rectangle(0, 0, this.Width - 1, this.Height - 1);
-        
-        using (GraphicsPath path = GetRoundedRectangle(rect, borderRadius))
-        {
-            // Set clipping region for rounded corners
-            Region = new Region(path);
-            
-            // Draw border
-            using (Pen pen = new Pen(borderColor, borderWidth))
-            {
-                g.DrawPath(pen, path);
+# WinForms behavior is most consistent under Windows PowerShell (Desktop edition).
+if ($PSVersionTable.PSEdition -ne "Desktop") {
+    if (-not $DesktopRelaunch -and $PSCommandPath) {
+        Write-RunLog "Non-Desktop PowerShell detected ($($PSVersionTable.PSEdition)). Relaunching in powershell.exe."
+        try {
+            $desktopPsExe = Join-Path $PSHOME "powershell.exe"
+            if (-not (Test-Path $desktopPsExe)) {
+                $desktopPsExe = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
             }
+            if (-not (Test-Path $desktopPsExe)) {
+                throw "powershell.exe not found at expected paths."
+            }
+            $dedicatedArg = if ($UseDedicatedUiProcess) { " -UseDedicatedUiProcess" } else { "" }
+            $child = Start-Process -FilePath $desktopPsExe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -STA -File `"$PSCommandPath`" -DesktopRelaunch -StaRelaunch$dedicatedArg" -PassThru -ErrorAction Stop
+            Write-RunLog "Desktop relaunch started. PID=$($child.Id) Path=$desktopPsExe"
+            return
+        } catch {
+            Write-RunLog "Desktop relaunch failed: $($_.Exception.Message). Continuing in current process."
         }
     }
 
-    private GraphicsPath GetRoundedRectangle(Rectangle rect, int radius)
-    {
-        GraphicsPath path = new GraphicsPath();
-        
-        int diameter = radius * 2;
-        
-        path.AddArc(rect.X, rect.Y, diameter, diameter, 180, 90);
-        path.AddArc(rect.Right - diameter, rect.Y, diameter, diameter, 270, 90);
-        path.AddArc(rect.Right - diameter, rect.Bottom - diameter, diameter, diameter, 0, 90);
-        path.AddArc(rect.X, rect.Bottom - diameter, diameter, diameter, 90, 90);
-        path.CloseFigure();
-        
-        return path;
-    }
+    Write-RunLog "Unable to relaunch in Desktop edition PowerShell."
+    Write-Output "System Summary UI must run in Windows PowerShell (powershell.exe)."
+    return
 }
-"@
+
+# WinForms UI requires an interactive desktop session.
+if (-not [Environment]::UserInteractive) {
+    Write-RunLog "Non-interactive session detected. UI cannot be shown."
+    Write-Output "System Summary UI requires an interactive user session. Open/run it from the logged-in user's desktop context."
+    return
+}
+
+# Optional dedicated UI process mode for environments that require process handoff.
+if ($UseDedicatedUiProcess -and -not $UiProcess -and $PSCommandPath) {
+    Write-RunLog "Spawning dedicated UI process."
+    try {
+        $desktopPsExe = Join-Path $PSHOME "powershell.exe"
+        if (-not (Test-Path $desktopPsExe)) {
+            $desktopPsExe = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
+        }
+        if (-not (Test-Path $desktopPsExe)) {
+            throw "powershell.exe not found at expected paths."
+        }
+
+        $child = Start-Process -FilePath $desktopPsExe -WindowStyle Normal -ArgumentList "-NoProfile -ExecutionPolicy Bypass -STA -File `"$PSCommandPath`" -UiProcess -DesktopRelaunch -StaRelaunch" -PassThru -ErrorAction Stop
+        Write-RunLog "Dedicated UI process started. PID=$($child.Id) Path=$desktopPsExe"
+        Start-Sleep -Milliseconds 700
+        $childAlive = Get-Process -Id $child.Id -ErrorAction SilentlyContinue
+        if ($childAlive) {
+            Write-RunLog "Dedicated UI process is running. Parent will exit."
+            return
+        }
+        Write-RunLog "Dedicated UI process exited immediately. Continuing in current process."
+    } catch {
+        Write-RunLog "Dedicated UI process spawn failed: $($_.Exception.Message). Continuing in current process."
+    }
+} else {
+    Write-RunLog "Using current process for UI."
+}
+
+# Clipboard and WinForms operations are most reliable in STA. Relaunch once if needed.
+if ([Threading.Thread]::CurrentThread.ApartmentState -ne [Threading.ApartmentState]::STA) {
+    if (-not $StaRelaunch -and $PSCommandPath) {
+        Write-RunLog "Non-STA thread detected. Relaunching with -STA."
+        Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -STA -File `"$PSCommandPath`" -StaRelaunch"
+        return
+    }
+
+    Write-RunLog "Unable to relaunch in STA mode."
+    Write-Output "System Summary UI must run in STA mode. Re-run with powershell.exe -STA."
+    return
+}
+
+try {
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+    Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+    Write-RunLog "WinForms assemblies loaded."
+} catch {
+    Write-RunLog "Failed loading WinForms assemblies: $($_.Exception.Message)"
+    throw
+}
+
+# Agent contexts can block/slow dynamic C# compilation via Add-Type -TypeDefinition.
+# Use native WinForms panel always for maximum compatibility.
+$script:useRoundedPanel = $false
+Write-RunLog "RoundedPanel disabled for agent compatibility. Using standard panel fallback."
 
 # Compatibility function for Windows 7 (PowerShell 2.0) support
 # Tries Get-CimInstance first (PowerShell 3.0+), falls back to Get-WmiObject (PowerShell 2.0+)
+$script:canUseCim = $null
 function Get-WmiCompat {
     param(
         [Parameter(Mandatory=$true)]
@@ -87,8 +124,11 @@ function Get-WmiCompat {
         [string]$Filter
     )
     
-    # Try Get-CimInstance first (PowerShell 3.0+)
-    if (Get-Command Get-CimInstance -ErrorAction SilentlyContinue) {
+    # Try Get-CimInstance first (PowerShell 3.0+), but cache capability check once.
+    if ($null -eq $script:canUseCim) {
+        $script:canUseCim = [bool](Get-Command Get-CimInstance -ErrorAction SilentlyContinue)
+    }
+    if ($script:canUseCim) {
         if ($Filter) {
             return Get-CimInstance -ClassName $ClassName -Filter $Filter -ErrorAction SilentlyContinue
         } else {
@@ -106,36 +146,64 @@ function Get-WmiCompat {
 }
 
 function Get-SystemInfo {
+    $infoStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
     # Device Info
     $computerName = [string]$env:COMPUTERNAME
     
     # Get logged-in user - account for script running as SYSTEM (RMM agent context)
     # When running as SYSTEM, we need to query for the actual logged-in user, not the SYSTEM account
     $userName = ""
-    
-    # Method 1: Query explorer.exe process owner (most reliable when running as SYSTEM)
-    # Explorer.exe runs in the user's session, so its owner is the logged-in user
+    $serviceAccountNames = @("SYSTEM", "LOCAL SERVICE", "NETWORK SERVICE")
+
+    # Fast-path user detection for standard logged-in user execution.
     try {
-        $explorerProcesses = Get-WmiCompat -ClassName Win32_Process | Where-Object { $_.Name -eq "explorer.exe" }
-        if ($explorerProcesses) {
-            foreach ($proc in $explorerProcesses) {
-                try {
-                    $owner = $proc.GetOwner()
-                    if ($owner -and $owner.User -and $owner.User -ne "SYSTEM" -and $owner.User -ne "LOCAL SERVICE" -and $owner.User -ne "NETWORK SERVICE") {
-                        $userName = $owner.User
-                        break
-                    }
-                } catch {
-                    # Continue to next process
-                }
+        if ($script:currentIdentity -and $script:currentIdentity -match "\\") {
+            $identityUser = $script:currentIdentity.Split('\')[-1]
+            if ($identityUser -and ($serviceAccountNames -notcontains $identityUser.ToUpper())) {
+                $userName = $identityUser
             }
         }
     } catch {
-        # Continue to next method
+        # Continue to fallback methods
+    }
+    if ([string]::IsNullOrWhiteSpace($userName) -and $env:USERNAME -and ($serviceAccountNames -notcontains $env:USERNAME.ToUpper())) {
+        $userName = $env:USERNAME
+    }
+
+    $isServiceContext = $false
+    if ($script:currentIdentity -match "\\SYSTEM$") {
+        $isServiceContext = $true
+    } elseif ($env:USERNAME -and ($serviceAccountNames -contains $env:USERNAME.ToUpper())) {
+        $isServiceContext = $true
+    }
+    
+    # Method 1: Query explorer.exe process owner (most reliable when running as SYSTEM)
+    # Explorer.exe runs in the user's session, so its owner is the logged-in user
+    if ([string]::IsNullOrWhiteSpace($userName) -or $isServiceContext) {
+        try {
+            $explorerProcesses = Get-WmiCompat -ClassName Win32_Process -Filter "Name='explorer.exe'"
+            if ($explorerProcesses) {
+                foreach ($proc in $explorerProcesses) {
+                    try {
+                        $owner = $proc.GetOwner()
+                        if ($owner -and $owner.User -and ($serviceAccountNames -notcontains $owner.User.ToUpper())) {
+                            $userName = $owner.User
+                            break
+                        }
+                    } catch {
+                        # Continue to next process
+                    }
+                }
+            }
+        } catch {
+            # Continue to next method
+        }
     }
     
     # Method 2: Query Win32_LogonSession for interactive sessions (LogonType 2 = local, 10 = RDP)
-    if ([string]::IsNullOrWhiteSpace($userName)) {
+    # This can be expensive; use only in service context.
+    if ([string]::IsNullOrWhiteSpace($userName) -and $isServiceContext) {
         try {
             $logonSessions = Get-WmiCompat -ClassName Win32_LogonSession | Where-Object { ($_.LogonType -eq 2) -or ($_.LogonType -eq 10) }
             if ($logonSessions) {
@@ -152,8 +220,8 @@ function Get-SystemInfo {
                                 # Extract SID from the reference string
                                 if ($accountSid -match 'SID="([^"]+)"') {
                                     $sid = $matches[1]
-                                    $account = Get-WmiCompat -ClassName Win32_Account | Where-Object { $_.SID -eq $sid }
-                                    if ($account -and $account.Name -ne "SYSTEM" -and $account.Name -ne "LOCAL SERVICE" -and $account.Name -ne "NETWORK SERVICE" -and $account.Domain -ne "NT AUTHORITY") {
+                                    $account = Get-WmiCompat -ClassName Win32_Account -Filter "SID='$sid'" | Select-Object -First 1
+                                    if ($account -and $account.Name -and ($serviceAccountNames -notcontains $account.Name.ToUpper()) -and $account.Domain -ne "NT AUTHORITY") {
                                         $userName = $account.Name
                                         break
                                     }
@@ -183,7 +251,7 @@ function Get-SystemInfo {
     }
     
     # Method 4: Use quser command to get logged-on users (works when running as SYSTEM)
-    if ([string]::IsNullOrWhiteSpace($userName)) {
+    if ([string]::IsNullOrWhiteSpace($userName) -and $isServiceContext) {
         try {
             $quserOutput = quser 2>$null
             if ($quserOutput) {
@@ -209,8 +277,14 @@ function Get-SystemInfo {
         $userName = "Unavailable"
     }
     
+    if (-not $compSys) {
+        try {
+            $compSys = Get-WmiCompat -ClassName Win32_ComputerSystem
+        } catch {
+            $compSys = $null
+        }
+    }
     try {
-        $compSys = Get-WmiCompat -ClassName Win32_ComputerSystem
         $domain = if ($compSys) { [string]$compSys.Domain } else { "Unavailable" }
     } catch {
         $domain = "Unavailable"
@@ -257,11 +331,11 @@ function Get-SystemInfo {
     }
 
     try {
-        $cpuObj = Get-WmiCompat -ClassName Win32_Processor | Select-Object -First 1
-        $cpu = if ($cpuObj) { $cpuObj.Name.Trim() } else { "Unavailable" }
-        
+        $allProcessors = @(Get-WmiCompat -ClassName Win32_Processor)
+        $cpuObj = $allProcessors | Select-Object -First 1
+        $cpu = if ($cpuObj -and $cpuObj.Name) { $cpuObj.Name.Trim() } else { "Unavailable" }
+
         # Get total cores (physical cores across all processors)
-        $allProcessors = Get-WmiCompat -ClassName Win32_Processor
         $totalCores = ($allProcessors | Measure-Object -Property NumberOfCores -Sum).Sum
         $totalLogicalProcessors = ($allProcessors | Measure-Object -Property NumberOfLogicalProcessors -Sum).Sum
         $coresDisplay = if ($totalCores) { "$totalCores Cores ($totalLogicalProcessors Logical)" } else { "Unavailable" }
@@ -385,6 +459,9 @@ function Get-SystemInfo {
         $networkAdapters = @()
     }
 
+    $infoStopwatch.Stop()
+    Write-RunLog "Get-SystemInfo completed in $($infoStopwatch.ElapsedMilliseconds) ms."
+
     return @{
         ComputerName = $computerName
         UserName = $userName
@@ -420,7 +497,9 @@ $valueFont = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.Fon
 $labelFont = New-Object System.Drawing.Font("Segoe UI", 7.5, [System.Drawing.FontStyle]::Regular)
 
 # Get system information
+Write-RunLog "Collecting system information."
 $sysInfo = Get-SystemInfo
+Write-RunLog "System information collected."
 
 # Get all active network adapters with valid gateways and DNS servers
 $activeAdapters = $sysInfo.NetworkAdapters | Where-Object { 
@@ -858,6 +937,7 @@ function Format-SystemInfoForEmail {
 }
 
 # Create form
+Write-RunLog "Creating form and controls."
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "System Summary"
 $form.Size = New-Object System.Drawing.Size(480, 650)
@@ -866,6 +946,12 @@ $form.MaximizeBox = $true
 $form.MinimizeBox = $true
 $form.BackColor = $backgroundColor
 $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+$form.TopMost = $true
+$form.Add_Shown({
+    $form.WindowState = [System.Windows.Forms.FormWindowState]::Normal
+    $form.Activate()
+    $form.BringToFront()
+})
 
 # Set form icon from GitHub
 try {
@@ -926,12 +1012,18 @@ function Add-Section {
     $rootTable.Controls.Add($divider, 0, $script:currentRow)
     $script:currentRow++
     
-    # Wrap DataTable in a RoundedPanel for border and rounded corners
-    $roundedPanel = New-Object RoundedPanel
-    $roundedPanel.BackColor = $contentColor
-    $roundedPanel.BorderColor = [System.Drawing.Color]::FromArgb(220, 220, 220)
-    $roundedPanel.BorderRadius = 6
-    $roundedPanel.BorderWidth = 1
+    # Wrap DataTable in rounded panel when available, otherwise use simple bordered panel.
+    if ($script:useRoundedPanel) {
+        $roundedPanel = New-Object RoundedPanel
+        $roundedPanel.BackColor = $contentColor
+        $roundedPanel.BorderColor = [System.Drawing.Color]::FromArgb(220, 220, 220)
+        $roundedPanel.BorderRadius = 6
+        $roundedPanel.BorderWidth = 1
+    } else {
+        $roundedPanel = New-Object System.Windows.Forms.Panel
+        $roundedPanel.BackColor = $contentColor
+        $roundedPanel.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    }
     $roundedPanel.AutoSize = $true
     $roundedPanel.Dock = [System.Windows.Forms.DockStyle]::Top
     $roundedPanel.Padding = New-Object System.Windows.Forms.Padding(0)
@@ -1565,7 +1657,9 @@ $autoCloseTimer.Add_Tick({
 $autoCloseTimer.Start()
 
 # Show form
-$form.ShowDialog()
+Write-RunLog "Showing dialog."
+[void]$form.ShowDialog()
+Write-RunLog "Dialog closed."
 
 # Clean up timer when form closes
 if ($autoCloseTimer) {
