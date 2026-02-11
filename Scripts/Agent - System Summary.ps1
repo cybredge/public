@@ -149,7 +149,7 @@ function Get-HttpTextCompat {
     param(
         [Parameter(Mandatory=$true)]
         [string]$Url,
-        [int]$TimeoutMs = 2500
+        [int]$TimeoutMs = 1400
     )
 
     try {
@@ -188,7 +188,7 @@ function Get-PublicNetworkInfo {
     )
 
     foreach ($endpoint in $endpoints) {
-        $json = Get-HttpTextCompat -Url $endpoint -TimeoutMs 2500
+        $json = Get-HttpTextCompat -Url $endpoint -TimeoutMs 1400
         if ([string]::IsNullOrWhiteSpace($json)) {
             continue
         }
@@ -359,6 +359,10 @@ function Get-SystemInfo {
     } elseif ($env:USERNAME -and ($serviceAccountNames -contains $env:USERNAME.ToUpper())) {
         $isServiceContext = $true
     }
+
+    # Fetch compSys once and reuse (domain, domainJoined, sysModel, totalRAM, Method 3)
+    $compSys = $null
+    try { $compSys = Get-WmiCompat -ClassName Win32_ComputerSystem } catch { }
     
     # Method 1: Query explorer.exe process owner (most reliable when running as SYSTEM)
     # Explorer.exe runs in the user's session, so its owner is the logged-in user
@@ -425,12 +429,10 @@ function Get-SystemInfo {
         }
     }
     
-    # Method 3: Query Win32_ComputerSystem for logged-in user (may work in some cases)
-    if ([string]::IsNullOrWhiteSpace($userName)) {
+    # Method 3: Use compSys (already fetched) for logged-in user
+    if ([string]::IsNullOrWhiteSpace($userName) -and $compSys) {
         try {
-            $compSys = Get-WmiCompat -ClassName Win32_ComputerSystem
-            if ($compSys -and $compSys.UserName -and $compSys.UserName -ne "" -and $compSys.UserName -notmatch "SYSTEM") {
-                # Extract username from "DOMAIN\Username" format
+            if ($compSys.UserName -and $compSys.UserName -ne "" -and $compSys.UserName -notmatch "SYSTEM") {
                 $userName = $compSys.UserName.Split('\')[-1]
             }
         } catch {
@@ -465,13 +467,6 @@ function Get-SystemInfo {
         $userName = "Unavailable"
     }
     
-    if (-not $compSys) {
-        try {
-            $compSys = Get-WmiCompat -ClassName Win32_ComputerSystem
-        } catch {
-            $compSys = $null
-        }
-    }
     try {
         $domain = if ($compSys) { [string]$compSys.Domain } else { "Unavailable" }
     } catch {
@@ -747,7 +742,18 @@ function Get-SystemInfo {
         $networkAdapters = @()
     }
 
-    $publicNetworkInfo = Get-PublicNetworkInfo
+    # Use background Public IP result if ready; otherwise fallback to sync fetch
+    $publicNetworkInfo = @{ PublicIP = "Unavailable"; ISP = "Unavailable" }
+    if ($script:publicIpJob) {
+        try {
+            $jobResult = Receive-Job -Job $script:publicIpJob -Wait -AutoRemoveJob -ErrorAction SilentlyContinue
+            if ($jobResult -and $jobResult.PublicIP) { $publicNetworkInfo = $jobResult }
+        } catch { }
+        $script:publicIpJob = $null
+    }
+    if ($publicNetworkInfo.PublicIP -eq "Unavailable") {
+        $publicNetworkInfo = Get-PublicNetworkInfo
+    }
 
     $infoStopwatch.Stop()
     Write-RunLog "Get-SystemInfo completed in $($infoStopwatch.ElapsedMilliseconds) ms."
@@ -792,6 +798,34 @@ $contentColor = [System.Drawing.Color]::White
 $headerFont = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
 $valueFont = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Bold)
 $labelFont = New-Object System.Drawing.Font("Segoe UI", 7.5, [System.Drawing.FontStyle]::Regular)
+
+# Start Public IP fetch in background (runs in parallel with Get-SystemInfo)
+$script:publicIpJob = $null
+try {
+$script:publicIpJob = Start-Job -ScriptBlock {
+    $result = @{ PublicIP = "Unavailable"; ISP = "Unavailable" }
+    try {
+        $request = [System.Net.HttpWebRequest]::Create("https://ipinfo.io/json")
+        $request.Method = "GET"
+        $request.Timeout = 1400
+        $request.ReadWriteTimeout = 1400
+        $request.UserAgent = "CybrEdge-SystemSummary/1.0"
+        $response = $request.GetResponse()
+        $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+        $json = $reader.ReadToEnd()
+        $reader.Dispose()
+        $response.Close()
+        if ($json) {
+            if ($json -match '"ip"\s*:\s*"([^"]+)"') { $result.PublicIP = $matches[1].Trim() }
+            if ($json -match '"org"\s*:\s*"([^"]+)"') { $result.ISP = ($matches[1] -replace '^AS\d+\s+','').Trim() }
+            elseif ($json -match '"isp"\s*:\s*"([^"]+)"') { $result.ISP = ($matches[1] -replace '^AS\d+\s+','').Trim() }
+        }
+    } catch { }
+    return $result
+}
+} catch {
+    $script:publicIpJob = $null
+}
 
 # Get system information
 Write-RunLog "Collecting system information."
@@ -878,6 +912,26 @@ function Set-ClipboardHtml {
     $dataObject.SetText($plainText)
     
     [System.Windows.Forms.Clipboard]::SetDataObject($dataObject, $true)
+}
+
+function Set-ClipboardTextWithRetry {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Text,
+        [int]$RetryCount = 5,
+        [int]$DelayMs = 120
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return }
+
+    for ($i = 0; $i -lt $RetryCount; $i++) {
+        try {
+            [System.Windows.Forms.Clipboard]::SetText($Text)
+            return
+        } catch {
+            Start-Sleep -Milliseconds $DelayMs
+        }
+    }
 }
 
 # Function to format system information for email (HTML)
@@ -1270,6 +1324,9 @@ $form.Add_Shown({
     $form.BringToFront()
 })
 
+# ToolTip for copy feedback
+$script:copyFeedbackTooltip = New-Object System.Windows.Forms.ToolTip
+
 # Set form icon from GitHub
 try {
     $iconUrl = "https://raw.githubusercontent.com/cybredge/public/90dd0143e4a30dd7d1dff5a4d69624133283657d/Assets/logo/icon.ico"
@@ -1303,6 +1360,53 @@ $rootTable.BackColor = $backgroundColor
 $rootTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100))) | Out-Null
 
 $currentRow = 0
+
+# Enable click-to-copy for displayed value controls.
+function Enable-ValueCopy {
+    param(
+        [Parameter(Mandatory=$true)]
+        [System.Windows.Forms.Control]$Control,
+        [string]$CopyText,
+        [string]$FieldLabel = ""
+    )
+
+    if ([string]::IsNullOrWhiteSpace($CopyText)) { return }
+
+    $Control.AccessibleDescription = $CopyText
+    $Control.AccessibleName = if ([string]::IsNullOrWhiteSpace($FieldLabel)) { "Value" } else { $FieldLabel.TrimEnd(':').Trim() }
+    $Control.Cursor = [System.Windows.Forms.Cursors]::Hand
+
+    $Control.Add_Click({
+        try {
+            $textToCopy = [string]$this.AccessibleDescription
+            if (-not [string]::IsNullOrWhiteSpace($textToCopy)) {
+                Set-ClipboardTextWithRetry -Text $textToCopy
+                $fieldName = [string]$this.AccessibleName
+                $msg = if ([string]::IsNullOrWhiteSpace($fieldName)) { "Copied!" } else { "Copied: $fieldName" }
+                $script:copyFeedbackTooltip.Show($msg, $this, 0, -22, 1500)
+            }
+        } catch {
+            # Ignore clipboard contention/UI copy failures.
+        }
+    })
+
+    $Control.Add_MouseUp({
+        param($src, $e)
+        if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right) {
+            try {
+                $textToCopy = [string]$src.AccessibleDescription
+                if (-not [string]::IsNullOrWhiteSpace($textToCopy)) {
+                    Set-ClipboardTextWithRetry -Text $textToCopy
+                    $fieldName = [string]$src.AccessibleName
+                    $msg = if ([string]::IsNullOrWhiteSpace($fieldName)) { "Copied!" } else { "Copied: $fieldName" }
+                    $script:copyFeedbackTooltip.Show($msg, $src, 0, -22, 1500)
+                }
+            } catch {
+                # Ignore clipboard contention/UI copy failures.
+            }
+        }
+    })
+}
 
 # Helper function to create section
 function Add-Section {
@@ -1397,6 +1501,7 @@ function Add-LabelValueRow {
     $value.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
     $value.Margin = New-Object System.Windows.Forms.Padding(6, 0, 0, 0)
     $Table.Controls.Add($value, 1, $RowIndex)
+    Enable-ValueCopy -Control $value -CopyText $ValueText -FieldLabel $LabelText
 }
 
 # ===== DEVICE INFORMATION SECTION =====
@@ -1621,6 +1726,7 @@ foreach ($disk in $sysInfo.Disks) {
     $driveLabel.AutoSize = $true
     $driveLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
     $diskTable.Controls.Add($driveLabel, 0, $rowIndex)
+    Enable-ValueCopy -Control $driveLabel -CopyText $driveLabel.Text -FieldLabel "Drive"
     
     # Model (left-aligned)
     $modelLabel = New-Object System.Windows.Forms.Label
@@ -1630,6 +1736,7 @@ foreach ($disk in $sysInfo.Disks) {
     $modelLabel.AutoSize = $true
     $modelLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
     $diskTable.Controls.Add($modelLabel, 1, $rowIndex)
+    Enable-ValueCopy -Control $modelLabel -CopyText $modelLabel.Text -FieldLabel "Model"
     
     # Total (right-aligned)
     $totalLabel = New-Object System.Windows.Forms.Label
@@ -1639,6 +1746,7 @@ foreach ($disk in $sysInfo.Disks) {
     $totalLabel.AutoSize = $true
     $totalLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
     $diskTable.Controls.Add($totalLabel, 2, $rowIndex)
+    Enable-ValueCopy -Control $totalLabel -CopyText $totalLabel.Text -FieldLabel "Total"
     
     # Free (right-aligned) - colored by usage (same thresholds as bar: green <70%, yellow 70-85%, red >=85%)
     $percentUsed = [math]::Round($disk.PercentUsed, 0)
@@ -1650,6 +1758,7 @@ foreach ($disk in $sysInfo.Disks) {
     $freeLabel.AutoSize = $true
     $freeLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
     $diskTable.Controls.Add($freeLabel, 3, $rowIndex)
+    Enable-ValueCopy -Control $freeLabel -CopyText $freeLabel.Text -FieldLabel "Free"
     
     # Compact usage indicator (small bar + percentage text)
     $usageContainer = New-Object System.Windows.Forms.FlowLayoutPanel
@@ -1691,6 +1800,7 @@ foreach ($disk in $sysInfo.Disks) {
     $percentLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
     $percentLabel.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 0)
     $usageContainer.Controls.Add($percentLabel)
+    Enable-ValueCopy -Control $percentLabel -CopyText $percentLabel.Text -FieldLabel "Usage"
 
     $diskTable.Controls.Add($usageContainer, 4, $rowIndex)
     
