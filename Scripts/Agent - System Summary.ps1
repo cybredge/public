@@ -506,9 +506,53 @@ function Get-SystemInfo {
     # Disk Info
     $disks = @()
     try {
-        # Build logical disk -> partition -> physical drive model mapping
-        # Use Get-WmiObject for association classes so Antecedent/Dependent are real objects (Get-CimInstance returns refs)
+        function Get-DiskTypeFromText {
+            param([string]$Text)
+            if ([string]::IsNullOrWhiteSpace($Text)) { return "Unknown" }
+            $t = $Text.ToUpperInvariant()
+            if ($t -match 'SSD|NVME|SOLID STATE|M\.2') { return "SSD" }
+            if ($t -match 'HDD|HARD DISK|ROTATIONAL') { return "HDD" }
+            return "Unknown"
+        }
+
+        # Simple model source (as requested): Get disk models directly from Win32_DiskDrive.
+        $allPhysicalDrives = @(Get-WmiCompat -ClassName Win32_DiskDrive)
+        $allPhysicalModels = @(
+            $allPhysicalDrives |
+            ForEach-Object { if ($_.Model) { [string]$_.Model.Trim() } } |
+            Where-Object { $_ -and $_ -ne "" } |
+            Select-Object -Unique
+        )
+        # Only use a fallback model when there is exactly one physical disk model.
+        # If multiple models exist, using a single fallback is misleading per-drive.
+        $fallbackModel = if ($allPhysicalModels.Count -eq 1) { $allPhysicalModels[0] } else { "Unknown" }
+
+        function Get-ModelFromLogicalDisk {
+            param([string]$LogicalDiskId)
+            if ([string]::IsNullOrWhiteSpace($LogicalDiskId)) { return $null }
+            try {
+                $diskSafe = $LogicalDiskId.Replace('\', '\\')
+                $parts = @(Get-WmiObject -Query "ASSOCIATORS OF {Win32_LogicalDisk.DeviceID='$diskSafe'} WHERE AssocClass=Win32_LogicalDiskToPartition" -ErrorAction SilentlyContinue)
+                foreach ($p in $parts) {
+                    if (-not $p -or -not $p.DeviceID) { continue }
+                    $partSafe = ([string]$p.DeviceID).Replace('\', '\\')
+                    $drives = @(Get-WmiObject -Query "ASSOCIATORS OF {Win32_DiskPartition.DeviceID='$partSafe'} WHERE AssocClass=Win32_DiskDriveToDiskPartition" -ErrorAction SilentlyContinue)
+                    foreach ($d in $drives) {
+                        if ($d -and $d.Model) {
+                            return ([string]$d.Model).Trim()
+                        }
+                    }
+                }
+            } catch {
+                return $null
+            }
+            return $null
+        }
+
+        # Build logical disk -> partition -> physical drive mapping (for per-drive model/type when available).
+        # Use Get-WmiObject for association classes so Antecedent/Dependent are real objects.
         $partToModel = @{}
+        $partToType = @{}
         $logToPart = @{}
         try {
             $dd2dp = Get-WmiObject -Class Win32_DiskDriveToDiskPartition -ErrorAction SilentlyContinue
@@ -517,8 +561,13 @@ function Get-SystemInfo {
                     $drive = $a.Antecedent
                     $part = $a.Dependent
                     $partId = if ($part) { [string]$part.DeviceID } else { $null }
-                    $model = if ($drive -and $drive.Model) { [string]$drive.Model.Trim() } else { "-" }
-                    if ($partId) { $partToModel[$partId] = $model }
+                    $model = if ($drive -and $drive.Model) { [string]$drive.Model.Trim() } else { $fallbackModel }
+                    $typeText = "{0} {1} {2}" -f ([string]$drive.MediaType), ([string]$drive.Model), ([string]$drive.InterfaceType)
+                    $diskType = Get-DiskTypeFromText -Text $typeText
+                    if ($partId) {
+                        $partToModel[$partId] = $model
+                        $partToType[$partId] = $diskType
+                    }
                 }
             }
             $ld2p = Get-WmiObject -Class Win32_LogicalDiskToPartition -ErrorAction SilentlyContinue
@@ -533,6 +582,7 @@ function Get-SystemInfo {
             }
         } catch {
             $partToModel = @{}
+            $partToType = @{}
             $logToPart = @{}
         }
 
@@ -544,9 +594,17 @@ function Get-SystemInfo {
             $used = $total - $free
             $percentUsed = if ($total -gt 0) { [math]::Round(($used / $total) * 100, 1) } else { 0 }
             $partId = if ($logToPart[$label]) { $logToPart[$label] } else { $null }
-            $model = if ($partId -and $partToModel[$partId]) { $partToModel[$partId] } else { "-" }
+            $model = if ($partId -and $partToModel[$partId]) { $partToModel[$partId] } else { $null }
+            if (-not $model -or $model -eq "") {
+                $model = Get-ModelFromLogicalDisk -LogicalDiskId $label
+            }
+            if (-not $model -or $model -eq "") {
+                $model = $fallbackModel
+            }
+            $diskType = if ($partId -and $partToType[$partId]) { $partToType[$partId] } else { "Unknown" }
             $disks += @{
                 Label = $label
+                DiskType = $diskType
                 Model = $model
                 Free = $free
                 Total = $total
@@ -899,13 +957,14 @@ function Format-SystemInfoForEmail {
             width: 60px;
         }
         .disk-table th:nth-child(2) {
-            width: 140px;
+            width: 220px;
         }
         .disk-table th:nth-child(3),
         .disk-table th:nth-child(4),
+        .disk-table th:nth-child(5),
         .disk-table th:nth-child(5) {
             text-align: right;
-            width: 100px;
+            width: 90px;
         }
         .disk-table td {
             padding: 2px 5px;
@@ -917,16 +976,16 @@ function Format-SystemInfoForEmail {
             width: 60px;
         }
         .disk-table td:nth-child(2) {
-            width: 140px;
+            width: 220px;
             word-wrap: break-word;
             overflow-wrap: break-word;
         }
         .disk-table td:nth-child(3),
-        .disk-table td:nth-child(4),
+        .disk-table td:nth-child(5),
         .disk-table td:nth-child(5) {
             text-align: right;
             font-variant-numeric: tabular-nums;
-            width: 100px;
+            width: 90px;
         }
         .network-table {
             width: 100%;
@@ -1560,7 +1619,7 @@ $diskTable.BackColor = $contentColor
 $diskTable.Padding = New-Object System.Windows.Forms.Padding(8, 6, 10, 6)
 
 $diskTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, 50))) | Out-Null
-$diskTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, 140))) | Out-Null
+$diskTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize))) | Out-Null
 $diskTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, 90))) | Out-Null
 $diskTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, 90))) | Out-Null
 $diskTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100))) | Out-Null
@@ -1613,7 +1672,6 @@ foreach ($disk in $sysInfo.Disks) {
     $modelLabel.ForeColor = $valueColor
     $modelLabel.AutoSize = $true
     $modelLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
-    $modelLabel.AutoEllipsis = $true
     $diskTable.Controls.Add($modelLabel, 1, $rowIndex)
     
     # Total (right-aligned)
@@ -1636,48 +1694,48 @@ foreach ($disk in $sysInfo.Disks) {
     $freeLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
     $diskTable.Controls.Add($freeLabel, 3, $rowIndex)
     
-    # Usage Bar container
-    $barContainer = New-Object System.Windows.Forms.TableLayoutPanel
-    $barContainer.ColumnCount = 2
-    $barContainer.RowCount = 1
-    $barContainer.AutoSize = $true
-    $barContainer.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100))) | Out-Null
-    $barContainer.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, 50))) | Out-Null
-    $barContainer.Padding = New-Object System.Windows.Forms.Padding(0, 4, 0, 4)
-    $barContainer.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 20))) | Out-Null
-    
+    # Compact usage indicator (small bar + percentage text)
+    $usageContainer = New-Object System.Windows.Forms.FlowLayoutPanel
+    $usageContainer.AutoSize = $true
+    $usageContainer.WrapContents = $false
+    $usageContainer.FlowDirection = [System.Windows.Forms.FlowDirection]::LeftToRight
+    $usageContainer.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 0)
+    $usageContainer.Padding = New-Object System.Windows.Forms.Padding(0, 3, 0, 0)
+
     $barColor = $freeColor
-    # Background track panel (faint background)
-    $trackPanel = New-Object System.Windows.Forms.Panel
-    $trackPanel.BackColor = [System.Drawing.Color]::FromArgb(230, 230, 230)  # Faint gray background track
-    $trackPanel.Height = 14
-    $trackPanel.Dock = [System.Windows.Forms.DockStyle]::Fill
-    $trackPanel.Margin = New-Object System.Windows.Forms.Padding(0)
-    
-    # Progress bar (kept exactly as-is)
-    $progressBar = New-Object System.Windows.Forms.ProgressBar
-    $progressBar.Minimum = 0
-    $progressBar.Maximum = 100
-    $progressBar.Value = $percentUsed
-    $progressBar.Height = 16
-    $progressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Continuous
-    $progressBar.ForeColor = $barColor
-    $progressBar.Dock = [System.Windows.Forms.DockStyle]::Fill
-    $trackPanel.Controls.Add($progressBar)
-    
-    $barContainer.Controls.Add($trackPanel, 0, 0)
-    
-    # Percentage label (vertically centered with bar)
+    $barWidth = 48
+    $barHeight = 10
+    $barTrack = New-Object System.Windows.Forms.Panel
+    $barTrack.Width = $barWidth
+    $barTrack.Height = $barHeight
+    $barTrack.BackColor = [System.Drawing.Color]::FromArgb(232, 232, 232)
+    $barTrack.Margin = New-Object System.Windows.Forms.Padding(0, 2, 5, 0)
+    $barTrack.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+
+    $percentUsedClamped = [Math]::Max(0, [Math]::Min(100, [int]$percentUsed))
+    $fillWidth = [int][Math]::Round(($percentUsedClamped / 100.0) * ($barWidth - 2))
+    if ($percentUsedClamped -gt 0 -and $fillWidth -lt 1) { $fillWidth = 1 }
+
+    $barFill = New-Object System.Windows.Forms.Panel
+    $barFill.Width = $fillWidth
+    $barFill.Height = ($barHeight - 2)
+    $barFill.Left = 1
+    $barFill.Top = 1
+    $barFill.BackColor = $barColor
+    $barTrack.Controls.Add($barFill)
+    $usageContainer.Controls.Add($barTrack)
+
+    # Percentage label
     $percentLabel = New-Object System.Windows.Forms.Label
     $percentLabel.Text = "$percentUsed%"
     $percentLabel.Font = $labelFont
     $percentLabel.ForeColor = $valueColor
     $percentLabel.AutoSize = $true
     $percentLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
-    $percentLabel.Dock = [System.Windows.Forms.DockStyle]::Fill
-    $barContainer.Controls.Add($percentLabel, 1, 0)
-    
-    $diskTable.Controls.Add($barContainer, 4, $rowIndex)
+    $percentLabel.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 0)
+    $usageContainer.Controls.Add($percentLabel)
+
+    $diskTable.Controls.Add($usageContainer, 4, $rowIndex)
     
     $rowIndex++
 }
@@ -1863,44 +1921,32 @@ $footerPanel.Controls.Add($footerTable)
 $form.Controls.Add($rootTable)
 $form.Controls.Add($footerPanel)
 
-# Calculate required width based on content and add buffer
-# Measure the widest content to ensure nothing wraps
-$maxWidth = 0
-$graphics = $form.CreateGraphics()
+# Calculate required width from actual table preferred sizes so content does not clip
+$deviceTable.PerformLayout()
+$hardwareTable.PerformLayout()
+$diskTable.PerformLayout()
+$networkTable.PerformLayout()
+$rootTable.PerformLayout()
+$footerTable.PerformLayout()
 
-# Check Device Information table
-foreach ($control in $deviceTable.Controls) {
-    if ($control -is [System.Windows.Forms.Label]) {
-        $textSize = $graphics.MeasureString($control.Text, $control.Font)
-        $controlWidth = $textSize.Width + $control.Margin.Left + $control.Margin.Right
-        if ($controlWidth -gt $maxWidth) { $maxWidth = $controlWidth }
-    }
-}
+$tablePreferredWidths = @(
+    [int][Math]::Ceiling($deviceTable.PreferredSize.Width),
+    [int][Math]::Ceiling($hardwareTable.PreferredSize.Width),
+    [int][Math]::Ceiling($diskTable.PreferredSize.Width),
+    [int][Math]::Ceiling($networkTable.PreferredSize.Width)
+)
+$maxTableWidth = ($tablePreferredWidths | Measure-Object -Maximum).Maximum
+if (-not $maxTableWidth) { $maxTableWidth = 480 }
 
-# Check Hardware table
-foreach ($control in $hardwareTable.Controls) {
-    if ($control -is [System.Windows.Forms.Label]) {
-        $textSize = $graphics.MeasureString($control.Text, $control.Font)
-        $controlWidth = $textSize.Width + $control.Margin.Left + $control.Margin.Right
-        if ($controlWidth -gt $maxWidth) { $maxWidth = $controlWidth }
-    }
-}
-
-# Check Network table
-foreach ($control in $networkTable.Controls) {
-    if ($control -is [System.Windows.Forms.Label]) {
-        $textSize = $graphics.MeasureString($control.Text, $control.Font)
-        $controlWidth = $textSize.Width + $control.Margin.Left + $control.Margin.Right
-        if ($controlWidth -gt $maxWidth) { $maxWidth = $controlWidth }
-    }
-}
-
-$graphics.Dispose()
-
-# Calculate total width needed: label column (130) + max content + padding (12+18) + root padding (16+24) + buffer
-$requiredWidth = 130 + $maxWidth + 12 + 18 + 16 + 24 + 40
+# Include root paddings, border/scrollbar buffer, and keep footer buttons visible.
+$requiredWidth = $maxTableWidth + $rootTable.Padding.Left + $rootTable.Padding.Right + 36
+$footerRequiredWidth = [int][Math]::Ceiling($footerTable.PreferredSize.Width) + 24
+if ($requiredWidth -lt $footerRequiredWidth) { $requiredWidth = $footerRequiredWidth }
 if ($requiredWidth -lt 480) { $requiredWidth = 480 }
+
 $form.Width = $requiredWidth
+# Prevent resizing narrower than calculated content width.
+$form.MinimumSize = New-Object System.Drawing.Size($requiredWidth, 520)
 
 # Calculate required height to show Device Info, Hardware, Disk Info, and first Network adapter
 $requiredHeight = 0
